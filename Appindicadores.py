@@ -379,11 +379,27 @@ if not atd_base.empty or not fin_base.empty:
         fin_base["os_id"] = fin_base["os_id"].astype(str)
 
     # Escolher chave de junção com prioridade para OS
-    if "os_id" in atd_base.columns and "os_id" in fin_base.columns:
+    if ("os_id" in atd_base.columns) and ("os_id" in fin_base.columns):
         os_view = pd.merge(atd_base, fin_base, on="os_id", how="outer")
     else:
-        # Se não houver os_id em ambos, tente por interseção de colunas seguras
-        common = [c for c in ["cliente_nome"] if c in atd_base.columns and c in fin_ba
+        common = [c for c in ["cliente_nome"] if (c in atd_base.columns) and (c in fin_base.columns)]
+        if common:
+            os_view = pd.merge(atd_base, fin_base, on=common, how="outer")
+        else:
+            # Fallback: concatena colunas lado a lado preservando o máximo de informação
+            os_view = pd.concat([atd_base.reset_index(drop=True), fin_base.reset_index(drop=True)], axis=1)
+
+    # Juntar endereço do profissional via CPF quando disponível; senão por nome
+    if not pro_base.empty:
+        if ("prof_cpf" in os_view.columns) and ("prof_cpf" in pro_base.columns):
+            os_view = pd.merge(os_view, pro_base, on="prof_cpf", how="left")
+        elif ("profissional_nome" in os_view.columns) and ("prof_nome" in pro_base.columns):
+            os_view = pd.merge(os_view, pro_base, left_on="profissional_nome", right_on="prof_nome", how="left")
+
+    os_view = os_view.loc[:, ~os_view.columns.duplicated()]
+
+# -------------------------------
+# UI — TABS
 # -------------------------------
 st.title("Indicadores — Vavivê")
 
