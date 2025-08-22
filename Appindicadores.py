@@ -186,9 +186,12 @@ if not atd.empty:
     }, inplace=True)
     # Valor do atendimento (se existir na OS)
     coalesce_inplace(atd, ["valor_atendimento", "valor", "valores", "procv_valores", "valor_total"], "valor_atendimento")
+    # chave sempre como string para evitar erro no merge
+    if "os_id" in atd.columns:
+        atd["os_id"] = atd["os_id"].astype(str)
     atd = atd.loc[:, ~atd.columns.duplicated()]
 
-# RECEBER (Contas a Receber)
+# RECEBER (Contas a Receber) (Contas a Receber)
 if not rec.empty:
     coalesce_inplace(rec, ["atendimento_id", "os", "os_id"], "os_id")
     rec.rename(columns={
@@ -369,21 +372,18 @@ if not pro.empty:
 # Montar visão consolidada por OS
 os_view = pd.DataFrame()
 if not atd_base.empty or not fin_base.empty:
-    os_view = pd.merge(atd_base, fin_base, on=[col for col in ["os_id", "cliente_nome"] if col in atd_base.columns and col in fin_base.columns], how="outer")
-    # Se não houver join por cliente_nome, fazer join por os_id apenas
-    if os_view.empty and "os_id" in atd_base.columns:
-        os_view = pd.merge(atd_base, fin_base, on="os_id", how="outer")
-    # Juntar endereço do profissional via CPF quando disponível
-    if not pro_base.empty:
-        if "prof_cpf" in os_view.columns and "prof_cpf" in pro_base.columns:
-            os_view = pd.merge(os_view, pro_base, on="prof_cpf", how="left")
-        else:
-            # fallback por nome da profissional
-            if "profissional_nome" in os_view.columns and "prof_nome" in pro_base.columns:
-                os_view = pd.merge(os_view, pro_base, left_on="profissional_nome", right_on="prof_nome", how="left")
+    # Garantir tipos compatíveis
+    if "os_id" in atd_base.columns:
+        atd_base["os_id"] = atd_base["os_id"].astype(str)
+    if "os_id" in fin_base.columns:
+        fin_base["os_id"] = fin_base["os_id"].astype(str)
 
-# -------------------------------
-# UI — TABS
+    # Escolher chave de junção com prioridade para OS
+    if "os_id" in atd_base.columns and "os_id" in fin_base.columns:
+        os_view = pd.merge(atd_base, fin_base, on="os_id", how="outer")
+    else:
+        # Se não houver os_id em ambos, tente por interseção de colunas seguras
+        common = [c for c in ["cliente_nome"] if c in atd_base.columns and c in fin_ba
 # -------------------------------
 st.title("Indicadores — Vavivê")
 
