@@ -21,14 +21,10 @@
 #    - Atendimentos_202507.xlsx (aba "Clientes")
 #    - Receber_202507.xlsx (aba "Dados Financeiros")
 #    - Repasses_202507.xlsx (aba "Dados Financeiros")
-# 4) Para ler do Google Drive, adicione nas **Secrets** do Streamlit Cloud:
-#    [[gdrive_service_account]]  (cole aqui o JSON completo do Service Account)
-#    Ex.:
-#    {"type":"service_account","project_id":"...","private_key_id":"...","private_key":"-----BEGIN PRIVATE KEY-----
-...
------END PRIVATE KEY-----
-","client_email":"svc@projeto.iam.gserviceaccount.com","token_uri":"https://oauth2.googleapis.com/token"}
-#    E compartilhe as pastas do Drive com o **client_email** do serviço (permissão Leitor).
+# 4) Para ler do Google Drive, adicione nas Secrets do Streamlit Cloud:
+#    Chave: gdrive_service_account
+#    Valor: cole o JSON COMPLETO do Service Account (como texto). ✱Não cole o JSON diretamente neste arquivo .py✱
+#    Depois, compartilhe as pastas do Drive com o e-mail do service account (permissão Leitor).
 # -------------------------------------------------------------
 
 import streamlit as st
