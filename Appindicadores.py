@@ -77,16 +77,29 @@ def coalesce_cols(df: pd.DataFrame, candidates: list[str], new: str) -> pd.DataF
     return df
 
 
-def load_excel(uploaded_file, fallback_path: str | None = None, sheet: str | None = None) -> pd.DataFrame:
-    """Carrega Excel de uploader; se vazio, tenta fallback local."""
+def load_excel(uploaded_file, fallback_path=None, sheet=None) -> pd.DataFrame:
+    """Carrega Excel do uploader ou caminho local.
+    Se `sheet` for None, sempre carrega a **primeira aba** e retorna um DataFrame.
+    Evita retornar dict (com todas as abas), o que quebraria `.empty`.
+    """
     try:
+        # Prioridade: arquivo enviado
         if uploaded_file is not None:
-            df = pd.read_excel(uploaded_file, sheet_name=sheet)
-        elif fallback_path is not None:
-            df = pd.read_excel(fallback_path, sheet_name=sheet)
-        else:
-            return pd.DataFrame()
-        return df
+            if sheet is None:
+                xls = pd.ExcelFile(uploaded_file)
+                first = xls.sheet_names[0]
+                return pd.read_excel(uploaded_file, sheet_name=first)
+            else:
+                return pd.read_excel(uploaded_file, sheet_name=sheet)
+        # Fallback: arquivo local
+        if fallback_path is not None:
+            if sheet is None:
+                xls = pd.ExcelFile(fallback_path)
+                first = xls.sheet_names[0]
+                return pd.read_excel(fallback_path, sheet_name=first)
+            else:
+                return pd.read_excel(fallback_path, sheet_name=sheet)
+        return pd.DataFrame()
     except Exception:
         return pd.DataFrame()
 
