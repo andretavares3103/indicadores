@@ -197,16 +197,25 @@ if not rec.empty:
     rename_rec = {
         "nome": "cliente_nome",
         "valor": "valor_recebido",
-        "situacao": "situacao",
-        "status": "situacao",
         "data_de_pagamento": "data_pagamento",
         "data_pagamento": "data_pagamento",
         "data_de_vencimento": "data_vencimento",
         "data_vencimento": "data_vencimento",
     }
     rec.rename(columns={c: rename_rec[c] for c in rename_rec if c in rec.columns}, inplace=True)
+
+    # Harmonizar situação/status evitando colunas duplicadas
+    if "situacao" in rec.columns and "status" in rec.columns:
+        rec["situacao"] = rec["situacao"].fillna(rec["status"])
+        rec.drop(columns=["status"], inplace=True)
+    elif "situacao" not in rec.columns and "status" in rec.columns:
+        rec.rename(columns={"status": "situacao"}, inplace=True)
+
     rec["data_pagamento"] = rec["data_pagamento"].apply(try_parse_date) if "data_pagamento" in rec.columns else pd.NaT
     rec["data_vencimento"] = rec["data_vencimento"].apply(try_parse_date) if "data_vencimento" in rec.columns else pd.NaT
+
+    # Remover colunas duplicadas, mantendo a primeira ocorrência
+    rec = rec.loc[:, ~rec.columns.duplicated()]
 
 # Repasses (Pagamentos às profissionais)
 if not rep.empty:
@@ -214,8 +223,6 @@ if not rep.empty:
     rename_rep = {
         "nome": "profissional_nome",
         "valor": "valor_repasse",
-        "situacao": "situacao_repasse",
-        "status": "situacao_repasse",
         "data_de_pagamento": "data_pagamento_repasse",
         "data_pagamento": "data_pagamento_repasse",
         "data_de_vencimento": "data_vencimento_repasse",
@@ -223,9 +230,24 @@ if not rep.empty:
         "profissional": "profissional_nome",
     }
     rep.rename(columns={c: rename_rep[c] for c in rename_rep if c in rep.columns}, inplace=True)
+
+    # Harmonizar situacao/status do repasse evitando duplicatas
+    if "situacao_repasse" not in rep.columns:
+        if "situacao" in rep.columns:
+            rep.rename(columns={"situacao": "situacao_repasse"}, inplace=True)
+        elif "status" in rep.columns:
+            rep.rename(columns={"status": "situacao_repasse"}, inplace=True)
+    else:
+        for _c in ["situacao", "status"]:
+            if _c in rep.columns:
+                rep.drop(columns=[_c], inplace=True)
+
     for dtc in ["data_pagamento_repasse", "data_vencimento_repasse"]:
         if dtc in rep.columns:
             rep[dtc] = rep[dtc].apply(try_parse_date)
+
+    # Remover colunas duplicadas, mantendo a primeira ocorrência
+    rep = rep.loc[:, ~rep.columns.duplicated()]
 
 # -------------------------------
 # Montagem Financeira: Receita x Repasse x Margem
