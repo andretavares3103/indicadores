@@ -21,7 +21,11 @@ import numpy as np
 import unicodedata
 from datetime import datetime, date
 from dateutil import parser
-import plotly.express as px
+try:
+    import plotly.express as px
+    USE_PLOTLY = True
+except Exception:
+    USE_PLOTLY = False
 
 st.set_page_config(
     page_title="Vavivê | Indicadores",
@@ -371,8 +375,11 @@ with aba[1]:
                 .reset_index()
             )
             origem_counts.columns = ["origem", "quantidade"]
-            fig = px.bar(origem_counts, x="origem", y="quantidade", title="Origem dos Clientes", text_auto=True)
-            st.plotly_chart(fig, use_container_width=True)
+            if USE_PLOTLY:
+                fig = px.bar(origem_counts, x="origem", y="quantidade", title="Origem dos Clientes", text_auto=True)
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.bar_chart(origem_counts.set_index("origem")["quantidade"])
         else:
             st.info("Coluna de origem do cliente não encontrada.")
 
@@ -392,8 +399,11 @@ with aba[1]:
             bairro_counts = cli[col_bairro].fillna("(sem bairro)").astype(str)
             bairro_counts = bairro_counts.replace({"": "(sem bairro)"}).value_counts().reset_index()
             bairro_counts.columns = ["bairro", "clientes"]
-            fig_b = px.bar(bairro_counts.head(20), x="bairro", y="clientes", title="Top Bairros por Clientes", text_auto=True)
-            cols[0].plotly_chart(fig_b, use_container_width=True)
+            if USE_PLOTLY:
+                fig_b = px.bar(bairro_counts.head(20), x="bairro", y="clientes", title="Top Bairros por Clientes", text_auto=True)
+                cols[0].plotly_chart(fig_b, use_container_width=True)
+            else:
+                cols[0].bar_chart(bairro_counts.set_index("bairro")["clientes"])
         else:
             cols[0].info("Coluna de bairro não encontrada.")
 
@@ -401,8 +411,11 @@ with aba[1]:
             cidade_counts = cli[col_cidade].fillna("(sem cidade)").astype(str)
             cidade_counts = cidade_counts.replace({"": "(sem cidade)"}).value_counts().reset_index()
             cidade_counts.columns = ["cidade", "clientes"]
-            fig_c = px.bar(cidade_counts, x="cidade", y="clientes", title="Clientes por Cidade", text_auto=True)
-            cols[1].plotly_chart(fig_c, use_container_width=True)
+            if USE_PLOTLY:
+                fig_c = px.bar(cidade_counts, x="cidade", y="clientes", title="Clientes por Cidade", text_auto=True)
+                cols[1].plotly_chart(fig_c, use_container_width=True)
+            else:
+                cols[1].bar_chart(cidade_counts.set_index("cidade")["clientes"])
         else:
             cols[1].info("Coluna de cidade não encontrada.")
 
@@ -455,8 +468,12 @@ with aba[3]:
             tmp = atd_f.copy()
             tmp["dia"] = tmp["data_atendimento"].dt.to_period("D").dt.to_timestamp()
             serie = tmp.groupby(["dia", "status_servico"]).size().reset_index(name="qtd")
-            fig = px.line(serie, x="dia", y="qtd", color="status_servico", markers=True, title="Atendimentos por Dia (por status)")
-            st.plotly_chart(fig, use_container_width=True)
+            if USE_PLOTLY:
+                fig = px.line(serie, x="dia", y="qtd", color="status_servico", markers=True, title="Atendimentos por Dia (por status)")
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                pivot = serie.pivot(index="dia", columns="status_servico", values="qtd").fillna(0).sort_index()
+                st.line_chart(pivot)
 
         cols = st.columns(3)
         concl = int(atd_f[atd_f.get("status_servico").fillna("").str.lower().eq("concluido")].shape[0]) if "status_servico" in atd_f.columns else 0
@@ -522,8 +539,11 @@ with aba[4]:
             if "data_pagamento" in rec_serie.columns:
                 rec_serie["mes"] = pd.to_datetime(rec_serie["data_pagamento"], errors="coerce").dt.to_period("M").dt.to_timestamp()
                 g = rec_serie.groupby("mes")["valor_recebido"].sum().reset_index()
-                fig_r = px.bar(g, x="mes", y="valor_recebido", title="Receita por Mês")
-                charts[0].plotly_chart(fig_r, use_container_width=True)
+                if USE_PLOTLY:
+                    fig_r = px.bar(g, x="mes", y="valor_recebido", title="Receita por Mês")
+                    charts[0].plotly_chart(fig_r, use_container_width=True)
+                else:
+                    charts[0].bar_chart(g.set_index("mes")["valor_recebido"])
 
         if not rep_f.empty and "valor_repasse" in rep_f.columns:
             rep_serie = rep_f.copy()
@@ -531,8 +551,11 @@ with aba[4]:
             if base_col:
                 rep_serie["mes"] = pd.to_datetime(rep_serie[base_col], errors="coerce").dt.to_period("M").dt.to_timestamp()
                 g2 = rep_serie.groupby("mes")["valor_repasse"].sum().reset_index()
-                fig_p = px.bar(g2, x="mes", y="valor_repasse", title="Repasses por Mês")
-                charts[1].plotly_chart(fig_p, use_container_width=True)
+                if USE_PLOTLY:
+                    fig_p = px.bar(g2, x="mes", y="valor_repasse", title="Repasses por Mês")
+                    charts[1].plotly_chart(fig_p, use_container_width=True)
+                else:
+                    charts[1].bar_chart(g2.set_index("mes")["valor_repasse"])
 
 st.markdown("---")
 st.caption("© Vavivê — Dashboard de indicadores. Este app aceita variações de nomes de colunas e tenta normalizar automaticamente. Para colunas ausentes, alguns gráficos podem não aparecer.")
