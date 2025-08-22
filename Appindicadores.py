@@ -11,13 +11,24 @@
 #    plotly
 #    openpyxl
 #    python-dateutil
+#    google-api-python-client
+#    google-auth
+#    google-auth-httplib2
+#    google-auth-oauthlib
 # 3) (Opcional) Suba também os arquivos .xlsx na raiz do repo com estes nomes:
 #    - Clientes.xlsx (1ª aba)
 #    - Profissionais.xlsx (1ª aba)
 #    - Atendimentos_202507.xlsx (aba "Clientes")
 #    - Receber_202507.xlsx (aba "Dados Financeiros")
 #    - Repasses_202507.xlsx (aba "Dados Financeiros")
-# 4) No Streamlit Cloud, aponte o app para este arquivo.
+# 4) Para ler do Google Drive, adicione nas **Secrets** do Streamlit Cloud:
+#    [[gdrive_service_account]]  (cole aqui o JSON completo do Service Account)
+#    Ex.:
+#    {"type":"service_account","project_id":"...","private_key_id":"...","private_key":"-----BEGIN PRIVATE KEY-----
+...
+-----END PRIVATE KEY-----
+","client_email":"svc@projeto.iam.gserviceaccount.com","token_uri":"https://oauth2.googleapis.com/token"}
+#    E compartilhe as pastas do Drive com o **client_email** do serviço (permissão Leitor).
 # -------------------------------------------------------------
 
 import streamlit as st
@@ -26,6 +37,7 @@ import numpy as np
 import unicodedata
 from datetime import datetime, date
 from dateutil import parser
+import io
 
 # Plotly com fallback automático
 try:
@@ -34,6 +46,15 @@ try:
 except Exception:
     USE_PLOTLY = False
     st.warning("Plotly não está instalado. Usando gráficos nativos do Streamlit como fallback.")
+
+# Google Drive libs (opcionais)
+try:
+    from google.oauth2 import service_account
+    from googleapiclient.discovery import build
+    from googleapiclient.http import MediaIoBaseDownload
+    USE_GDRIVE_LIBS = True
+except Exception:
+    USE_GDRIVE_LIBS = False
 
 st.set_page_config(
     page_title="Vavivê | Indicadores",
@@ -76,7 +97,6 @@ def try_parse_date(x):
 
 
 def coalesce_inplace(df: pd.DataFrame, candidates: list[str], new: str) -> pd.DataFrame:
-    """Cria/atualiza coluna `new` a partir da primeira coluna existente em candidates."""
     for c in candidates:
         if c in df.columns:
             df[new] = df[c]
@@ -85,11 +105,118 @@ def coalesce_inplace(df: pd.DataFrame, candidates: list[str], new: str) -> pd.Da
         df[new] = np.nan
     return df
 
+# -------------
+# Google Drive
+# -------------
+@st.cache_data(show_spinner=False)
+def get_drive_service():
+    if not USE_GDRIVE_LIBS:
+        return None
+    try:
+        info = st.secrets.get("gdrive_service_account", None)
+        if info is None:
+            return None
+        if isinstance(info, str):
+            import json
+            info = json.loads(info)
+        creds = service_account.Credentials.from_service_account_info(
+            info,
+            scopes=["https://www.googleapis.com/auth/drive.readonly"],
+        )
+        service = build("drive", "v3", credentials=creds, cache_discovery=False)
+        return service
+    except Exception:
+        return None
+
+@st.cache_data(ttl=600, show_spinner=False)
+def drive_list_files(folder_id: str):
+    service = get_drive_service()
+    if service is None or not folder_id:
+        return []
+    q = f"'{folder_id}' in parents and trashed = false"
+    fields = "nextPageToken, files(id, name, mimeType, modifiedTime)"
+    files = []
+    page_token = None
+    while True:
+        resp = service.files().list(q=q, fields=fields, pageToken=page_token).execute()
+        files.extend(resp.get("files", []))
+        page_token = resp.get("nextPageToken")
+        if not page_token:
+            break
+    # ordenar por modifiedTime desc
+    files.sort(key=lambda x: x.get("modifiedTime", ""), reverse=True)
+    return files
+
+def _drive_download_bytes(file_id: str, mime_type: str) -> bytes:
+    service = get_drive_service()
+    if service is None:
+        return b""
+    buf = io.BytesIO()
+    if mime_type == "application/vnd.google-apps.spreadsheet":
+        req = service.files().export_media(
+            fileId=file_id,
+            mimeType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+    else:
+        req = service.files().get_media(fileId=file_id)
+    downloader = MediaIoBaseDownload(buf, req)
+    done = False
+    while not done:
+        status, done = downloader.next_chunk()
+    return buf.getvalue()
+
+def read_drive_folder(folder_id: str, preferred_sheet: str | None = None, mode: str = "latest") -> pd.DataFrame:
+    """Lê arquivos (Excel/Google Sheets/CSV) de uma pasta do Drive.
+    mode: 'latest' pega o mais recente; 'concat' concatena todos.
+    """
+    files = drive_list_files(folder_id)
+    if not files:
+        return pd.DataFrame()
+
+    # Aceitar estes tipos
+    allowed = {
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
+        "application/vnd.ms-excel": "xls",
+        "text/csv": "csv",
+        "application/vnd.google-apps.spreadsheet": "gsheet",
+    }
+
+    dfs = []
+    take = files if mode == "concat" else [files[0]]
+    for f in take:
+        mt = f.get("mimeType")
+        if mt not in allowed:
+            continue
+        raw = _drive_download_bytes(f["id"], mt)
+        if not raw:
+            continue
+        bio = io.BytesIO(raw)
+        try:
+            if mt == "text/csv":
+                df = pd.read_csv(bio)
+            else:
+                # Excel ou Google Sheets (exportado como xlsx)
+                if preferred_sheet is None:
+                    # pegar primeira aba
+                    xls = pd.ExcelFile(bio)
+                    df = pd.read_excel(xls, sheet_name=xls.sheet_names[0])
+                else:
+                    df = pd.read_excel(bio, sheet_name=preferred_sheet)
+            df["_source_file"] = f.get("name")
+            df["_modified"] = f.get("modifiedTime")
+            dfs.append(df)
+        except Exception as e:
+            st.warning(f"Falha ao ler {f.get('name')}: {e}")
+            continue
+    if not dfs:
+        return pd.DataFrame()
+    return pd.concat(dfs, ignore_index=True, sort=False) if mode == "concat" else dfs[0]
+
+# -------------
+# Local files
+# -------------
 
 def load_excel(uploaded_file, fallback_path=None, sheet=None) -> pd.DataFrame:
-    """Carrega Excel do uploader ou caminho local. Sempre retorna **DataFrame**.
-    Se `sheet` for None, pega a **primeira aba** automaticamente.
-    """
     try:
         if uploaded_file is not None:
             if sheet is None:
@@ -110,23 +237,49 @@ def load_excel(uploaded_file, fallback_path=None, sheet=None) -> pd.DataFrame:
         return pd.DataFrame()
 
 # -------------------------------
-# Sidebar — Uploads e Filtros
+# Sidebar — Fonte de dados e Filtros
 # -------------------------------
 with st.sidebar:
-    st.markdown("## 📥 Arquivos de Dados")
-    up_clientes = st.file_uploader("Clientes.xlsx", type=["xlsx"], key="clientes")
-    up_prof     = st.file_uploader("Profissionais.xlsx", type=["xlsx"], key="prof")
-    up_atend    = st.file_uploader("Atendimentos_2025MM.xlsx", type=["xlsx"], key="atend")
-    up_receber  = st.file_uploader("Receber_2025MM.xlsx", type=["xlsx"], key="receber")
-    up_repasses = st.file_uploader("Repasses_2025MM.xlsx", type=["xlsx"], key="repasses")
-    st.caption("Se não enviar, o app tenta ler arquivos com esses nomes na pasta do repositório.")
+    st.markdown("## 📥 Fonte de Dados")
+    fonte = st.radio("De onde ler as bases?", ["Arquivos locais / Upload", "Google Drive"], index=0)
 
-# Carregar dados (com nomes e abas padrão já mapeados)
-raw_clientes = load_excel(up_clientes, "Clientes.xlsx")
-raw_prof     = load_excel(up_prof, "Profissionais.xlsx")
-raw_atend    = load_excel(up_atend, "Atendimentos_202507.xlsx", sheet="Clientes")
-raw_receber  = load_excel(up_receber, "Receber_202507.xlsx", sheet="Dados Financeiros")
-raw_repasses = load_excel(up_repasses, "Repasses_202507.xlsx", sheet="Dados Financeiros")
+    if fonte == "Arquivos locais / Upload":
+        up_clientes = st.file_uploader("Clientes.xlsx", type=["xlsx"], key="clientes")
+        up_prof     = st.file_uploader("Profissionais.xlsx", type=["xlsx"], key="prof")
+        up_atend    = st.file_uploader("Atendimentos_2025MM.xlsx", type=["xlsx"], key="atend")
+        up_receber  = st.file_uploader("Receber_2025MM.xlsx", type=["xlsx"], key="receber")
+        up_repasses = st.file_uploader("Repasses_2025MM.xlsx", type=["xlsx"], key="repasses")
+        st.caption("Se não enviar, o app tenta ler arquivos com esses nomes na pasta do repositório.")
+        modo_drive = None
+        drive_ids = {}
+    else:
+        if not USE_GDRIVE_LIBS:
+            st.error("Bibliotecas do Google Drive não instaladas. Adicione-as ao requirements.txt.")
+        st.caption("Informe os **Folder IDs**. Abra cada pasta no Drive e copie o ID da URL.")
+        drive_ids = {
+            "clientes": st.text_input("Folder ID — Clientes", value=""),
+            "profissionais": st.text_input("Folder ID — Profissionais", value=""),
+            "atendimentos": st.text_input("Folder ID — Atendimentos", value=""),
+            "receber": st.text_input("Folder ID — Contas a receber", value=""),
+            "repasses": st.text_input("Folder ID — Repasses", value=""),
+        }
+        modo_drive = st.selectbox("Se houver vários arquivos por pasta...", ["Mais recente", "Concatenar todos"], index=0)
+        st.caption("Dica: compartilhe as pastas com o e-mail do service account nas Secrets.")
+
+# Carregar dados conforme fonte
+if fonte == "Arquivos locais / Upload":
+    raw_clientes = load_excel(up_clientes, "Clientes.xlsx")
+    raw_prof     = load_excel(up_prof, "Profissionais.xlsx")
+    raw_atend    = load_excel(up_atend, "Atendimentos_202507.xlsx", sheet="Clientes")
+    raw_receber  = load_excel(up_receber, "Receber_202507.xlsx", sheet="Dados Financeiros")
+    raw_repasses = load_excel(up_repasses, "Repasses_202507.xlsx", sheet="Dados Financeiros")
+else:
+    mode = "concat" if modo_drive == "Concatenar todos" else "latest"
+    raw_clientes = read_drive_folder(drive_ids.get("clientes", ""), preferred_sheet=None,               mode=mode) if drive_ids else pd.DataFrame()
+    raw_prof     = read_drive_folder(drive_ids.get("profissionais", ""), preferred_sheet=None,           mode=mode) if drive_ids else pd.DataFrame()
+    raw_atend    = read_drive_folder(drive_ids.get("atendimentos", ""), preferred_sheet="Clientes",     mode=mode) if drive_ids else pd.DataFrame()
+    raw_receber  = read_drive_folder(drive_ids.get("receber", ""), preferred_sheet="Dados Financeiros", mode=mode) if drive_ids else pd.DataFrame()
+    raw_repasses = read_drive_folder(drive_ids.get("repasses", ""), preferred_sheet="Dados Financeiros",mode=mode) if drive_ids else pd.DataFrame()
 
 # Normalizar colunas
 cli = normalize_columns(raw_clientes) if not raw_clientes.empty else pd.DataFrame()
@@ -163,7 +316,6 @@ if not pro.empty:
         "atendimentos_feitos": "att_feitos",
         "atendimentos_recusado": "att_recusados",
     }, inplace=True)
-    # Endereço do profissional (coalesce genérico)
     coalesce_inplace(pro, ["endereco_1_rua", "endereco_rua", "rua", "logradouro"], "prof_rua")
     coalesce_inplace(pro, ["endereco_1_bairro", "endereco_bairro", "bairro"], "prof_bairro")
     coalesce_inplace(pro, ["endereco_1_cidade", "cidade"], "prof_cidade")
@@ -184,14 +336,12 @@ if not atd.empty:
         "atendimento_bairro": "bairro",
         "atendimento_rua": "rua",
     }, inplace=True)
-    # Valor do atendimento (se existir na OS)
     coalesce_inplace(atd, ["valor_atendimento", "valor", "valores", "procv_valores", "valor_total"], "valor_atendimento")
-    # chave sempre como string para evitar erro no merge
     if "os_id" in atd.columns:
         atd["os_id"] = atd["os_id"].astype(str)
     atd = atd.loc[:, ~atd.columns.duplicated()]
 
-# RECEBER (Contas a Receber) (Contas a Receber)
+# RECEBER (Contas a Receber)
 if not rec.empty:
     coalesce_inplace(rec, ["atendimento_id", "os", "os_id"], "os_id")
     rec.rename(columns={
@@ -204,13 +354,11 @@ if not rec.empty:
         "profissional_cpf": "prof_cpf",
         "profissional_celular": "prof_celular",
     }, inplace=True)
-    # Harmonizar situacao/status
     if "situacao" in rec.columns and "status" in rec.columns:
         rec["situacao"] = rec["situacao"].fillna(rec["status"])
         rec.drop(columns=["status"], inplace=True)
     elif "situacao" not in rec.columns and "status" in rec.columns:
         rec.rename(columns={"status": "situacao"}, inplace=True)
-    # Datas
     if "data_pagamento" in rec.columns:
         rec["data_pagamento"] = rec["data_pagamento"].apply(try_parse_date)
     if "data_vencimento" in rec.columns:
@@ -256,26 +404,25 @@ if not rec.empty or not rep.empty:
     left["os_id"] = left["os_id"].astype(str)
     right["os_id"] = right["os_id"].astype(str)
 
-    # Agregar por OS (tratando múltiplos lançamentos)
     def _first_nonnull(s):
         return s.dropna().iloc[0] if s.dropna().size else np.nan
 
     rec_ag = left.groupby("os_id", as_index=False).agg({
-        "cliente_nome": _first_nonnull if "cliente_nome" in left.columns else lambda s: np.nan,
-        "valor_recebido": "sum" if "valor_recebido" in left.columns else _first_nonnull,
-        "data_pagamento": "max" if "data_pagamento" in left.columns else _first_nonnull,
-        "data_vencimento": "max" if "data_vencimento" in left.columns else _first_nonnull,
-        "situacao": _first_nonnull if "situacao" in left.columns else lambda s: np.nan,
-        "prof_cpf": _first_nonnull if "prof_cpf" in left.columns else lambda s: np.nan,
+        "cliente_nome": _first_nonnull if "cliente_nome" in left.columns else (lambda s: np.nan),
+        "valor_recebido": "sum" if "valor_recebido" in left.columns else (lambda s: np.nan),
+        "data_pagamento": "max" if "data_pagamento" in left.columns else (lambda s: np.nan),
+        "data_vencimento": "max" if "data_vencimento" in left.columns else (lambda s: np.nan),
+        "situacao": _first_nonnull if "situacao" in left.columns else (lambda s: np.nan),
+        "prof_cpf": _first_nonnull if "prof_cpf" in left.columns else (lambda s: np.nan),
     }) if not left.empty else pd.DataFrame(columns=["os_id"]) 
 
     rep_ag = right.groupby("os_id", as_index=False).agg({
-        "profissional_nome": _first_nonnull if "profissional_nome" in right.columns else lambda s: np.nan,
-        "valor_repasse": "sum" if "valor_repasse" in right.columns else _first_nonnull,
-        "data_pagamento_repasse": "max" if "data_pagamento_repasse" in right.columns else _first_nonnull,
-        "data_vencimento_repasse": "max" if "data_vencimento_repasse" in right.columns else _first_nonnull,
-        "situacao_repasse": _first_nonnull if "situacao_repasse" in right.columns else lambda s: np.nan,
-        "prof_cpf": _first_nonnull if "prof_cpf" in right.columns else lambda s: np.nan,
+        "profissional_nome": _first_nonnull if "profissional_nome" in right.columns else (lambda s: np.nan),
+        "valor_repasse": "sum" if "valor_repasse" in right.columns else (lambda s: np.nan),
+        "data_pagamento_repasse": "max" if "data_pagamento_repasse" in right.columns else (lambda s: np.nan),
+        "data_vencimento_repasse": "max" if "data_vencimento_repasse" in right.columns else (lambda s: np.nan),
+        "situacao_repasse": _first_nonnull if "situacao_repasse" in right.columns else (lambda s: np.nan),
+        "prof_cpf": _first_nonnull if "prof_cpf" in right.columns else (lambda s: np.nan),
     }) if not right.empty else pd.DataFrame(columns=["os_id"]) 
 
     fin = pd.merge(rec_ag, rep_ag, on="os_id", how="outer", suffixes=("_rec", "_rep"))
@@ -352,33 +499,30 @@ if not fin_f.empty:
 # -------------------------------
 # Views auxiliares — OS unificada
 # -------------------------------
-# Base de endereço do atendimento
 atd_base = pd.DataFrame()
 if not atd_f.empty:
     keep_cols = [c for c in ["os_id", "cliente_nome", "data_atendimento", "valor_atendimento", "endereco", "rua", "bairro", "cidade", "cep", "complemento"] if c in atd_f.columns]
     atd_base = atd_f[keep_cols].copy()
 
-# Agregados financeiros já estão em fin_f; garantir colunas chave
+fin_base = pd.DataFrame()
 if not fin_f.empty:
     fin_base = fin_f[[c for c in ["os_id", "cliente_nome", "valor_recebido", "valor_repasse", "mc", "profissional_nome", "prof_cpf"] if c in fin_f.columns]].copy()
-else:
-    fin_base = pd.DataFrame(columns=["os_id"]) 
 
-# Endereço do profissional
 pro_base = pd.DataFrame()
 if not pro.empty:
-    pro_base = pro[[c for c in ["prof_cpf", "prof_nome", "prof_rua", "prof_bairro", "prof_cidade", "prof_cep"] if c in pro.columns]].drop_duplicates(subset=["prof_cpf"]) if "prof_cpf" in pro.columns else pro[[c for c in ["prof_nome", "prof_rua", "prof_bairro", "prof_cidade", "prof_cep"] if c in pro.columns]].drop_duplicates()
+    if "prof_cpf" in pro.columns:
+        pro_base = pro[[c for c in ["prof_cpf", "prof_nome", "prof_rua", "prof_bairro", "prof_cidade", "prof_cep"] if c in pro.columns]].drop_duplicates(subset=["prof_cpf"]) 
+    else:
+        pro_base = pro[[c for c in ["prof_nome", "prof_rua", "prof_bairro", "prof_cidade", "prof_cep"] if c in pro.columns]].drop_duplicates()
 
 # Montar visão consolidada por OS
 os_view = pd.DataFrame()
 if not atd_base.empty or not fin_base.empty:
-    # Garantir tipos compatíveis
     if "os_id" in atd_base.columns:
         atd_base["os_id"] = atd_base["os_id"].astype(str)
     if "os_id" in fin_base.columns:
         fin_base["os_id"] = fin_base["os_id"].astype(str)
 
-    # Escolher chave de junção com prioridade para OS
     if ("os_id" in atd_base.columns) and ("os_id" in fin_base.columns):
         os_view = pd.merge(atd_base, fin_base, on="os_id", how="outer")
     else:
@@ -386,10 +530,8 @@ if not atd_base.empty or not fin_base.empty:
         if common:
             os_view = pd.merge(atd_base, fin_base, on=common, how="outer")
         else:
-            # Fallback: concatena colunas lado a lado preservando o máximo de informação
             os_view = pd.concat([atd_base.reset_index(drop=True), fin_base.reset_index(drop=True)], axis=1)
 
-    # Juntar endereço do profissional via CPF quando disponível; senão por nome
     if not pro_base.empty:
         if ("prof_cpf" in os_view.columns) and ("prof_cpf" in pro_base.columns):
             os_view = pd.merge(os_view, pro_base, on="prof_cpf", how="left")
@@ -404,7 +546,7 @@ if not atd_base.empty or not fin_base.empty:
 st.title("Indicadores — Vavivê")
 
 if all([df.empty for df in [cli, pro, atd, rec, rep]]):
-    st.info("Envie ou inclua os arquivos .xlsx solicitados para visualizar os indicadores.")
+    st.info("Envie/aponte as bases para visualizar os indicadores.")
 
 aba = st.tabs([
     "📋 Visão Geral",
@@ -452,7 +594,6 @@ with aba[1]:
     if cli.empty:
         st.warning("Base de Clientes não carregada.")
     else:
-        # Origem
         col_origem = None
         for c in ["origem_cliente", "origem"]:
             if c in cli.columns:
@@ -477,7 +618,6 @@ with aba[1]:
 
         st.markdown("---")
         st.subheader("Regiões")
-        # Bairro / Cidade
         col_bairro = None
         for c in ["bairro", "endereco_bairro", "endereco-1-bairro"]:
             cc = _slug(c)
@@ -593,7 +733,6 @@ with aba[4]:
         c2.metric("Repasses no período", f"R$ {repasses:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
         c3.metric("Margem de Contribuição", f"R$ {mc_total:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
 
-        # Inadimplência (valor em aberto)
         inad = 0
         if not rec_f.empty and {"data_vencimento", "data_pagamento"}.issubset(set(rec_f.columns)):
             hoje = pd.Timestamp.today().normalize()
@@ -645,7 +784,6 @@ with aba[5]:
     if os_view.empty:
         st.info("Não há dados suficientes para a visão por OS. Garanta Atendimentos, Receber e Repasses carregados.")
     else:
-        # Preparar lista de OS disponíveis
         os_view["os_id"] = os_view["os_id"].astype(str)
         opcoes_os = sorted(os_view["os_id"].dropna().unique().tolist())
 
@@ -657,7 +795,6 @@ with aba[5]:
         else:
             reg = registro.iloc[0]
 
-            # KPIs financeiros
             v_atend = float(reg.get("valor_atendimento", np.nan)) if not pd.isna(reg.get("valor_atendimento", np.nan)) else np.nan
             v_pago  = float(reg.get("valor_recebido", 0) or 0)
             v_rep   = float(reg.get("valor_repasse", 0) or 0)
@@ -672,7 +809,6 @@ with aba[5]:
             st.markdown("---")
             c1, c2 = st.columns(2)
 
-            # Bloco Cliente/Atendimento
             with c1:
                 st.markdown("### Cliente & Atendimento")
                 st.write({
@@ -685,7 +821,6 @@ with aba[5]:
                     "CEP": reg.get("cep"),
                 })
 
-            # Bloco Profissional/Repasse
             with c2:
                 st.markdown("### Profissional & Repasse")
                 st.write({
