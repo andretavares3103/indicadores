@@ -6,11 +6,11 @@
 # 1) Crie um repositório com este arquivo como `app.py` (ou `Appindicadores.py`).
 # 2) Inclua um `requirements.txt` com:
 #    streamlit
-pandas
-numpy
-plotly
-openpyxl
-python-dateutil
+#    pandas
+#    numpy
+#    plotly
+#    openpyxl
+#    python-dateutil
 # 3) (Opcional) Suba também os arquivos .xlsx na raiz do repo com estes nomes:
 #    - Clientes.xlsx (1ª aba)
 #    - Profissionais.xlsx (1ª aba)
