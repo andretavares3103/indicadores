@@ -161,7 +161,7 @@ def _drive_download_bytes(file_id: str, mime_type: str) -> bytes:
         status, done = downloader.next_chunk()
     return buf.getvalue()
 
-def read_drive_folder(folder_id: str, preferred_sheet: str | None = None, mode: str = "concat") -> pd.DataFrame:
+def read_drive_folder(folder_id: str, preferred_sheet: str | None = None, mode: str = "latest") -> pd.DataFrame:
     """Lê arquivos (Excel/Google Sheets/CSV) de uma pasta do Drive.
     mode: 'latest' pega o mais recente; 'concat' concatena todos.
     """
@@ -241,23 +241,22 @@ USE_GDRIVE = True
 GDRIVE_MODE = "concat"  # "concat" ou "latest"
 
 # Informe os FOLDER IDs das pastas (use Secrets ou coloque diretamente aqui)
-#FOLDER_IDS = {
- #   "clientes":      st.secrets.get("GDRIVE_CLIENTES_FOLDER_ID", ""),
-  #  "profissionais": st.secrets.get("GDRIVE_PROFISSIONAIS_FOLDER_ID", ""),
-   # "atendimentos":  st.secrets.get("GDRIVE_ATENDIMENTOS_FOLDER_ID", ""),
-    #"receber":       st.secrets.get("GDRIVE_RECEBER_FOLDER_ID", ""),
-    #"repasses":      st.secrets.get("GDRIVE_REPASSES_FOLDER_ID", ""),
-#}
-
-# OPCIONAL: se preferir hardcode, remova o st.secrets acima e cole os IDs entre aspas:
 FOLDER_IDS = {
-    "clientes": "16-OwSOPszrkkXIUo5-jO9OruxPt6xlNB",      # cole o ID da pasta
-    "profissionais": "1r14S65qfk6UUNDn0gX4Bihk2OjihsRft",
-    "atendimentos": "1MRcXmVAx9V-4F41N9KkxaOX1UxuNCM0U",
-    "receber": "1qKrwvrCU97LgKrh2waw5SmmnGVvPIxAX",
-    "repasses": "1mm0PKdY1E7YYnU3ypR6k7aEmghvUhcvi",
+    "clientes":      st.secrets.get("GDRIVE_CLIENTES_FOLDER_ID", ""),
+    "profissionais": st.secrets.get("GDRIVE_PROFISSIONAIS_FOLDER_ID", ""),
+    "atendimentos":  st.secrets.get("GDRIVE_ATENDIMENTOS_FOLDER_ID", ""),
+    "receber":       st.secrets.get("GDRIVE_RECEBER_FOLDER_ID", ""),
+    "repasses":      st.secrets.get("GDRIVE_REPASSES_FOLDER_ID", ""),
 }
 
+# OPCIONAL: se preferir hardcode, remova o st.secrets acima e cole os IDs entre aspas:
+# FOLDER_IDS = {
+#   "clientes": "1AbC...",
+#   "profissionais": "1Def...",
+#   "atendimentos": "1GhI...",
+#   "receber": "1JkL...",
+#   "repasses": "1MnO...",
+# }
 
 st.sidebar.markdown("**Fonte:** Google Drive (configuração fixa)")
 
@@ -833,5 +832,3 @@ with aba[5]:
 
 st.markdown("---")
 st.caption("© Vavivê — Dashboard de indicadores. Este app aceita variações de nomes de colunas e tenta normalizar automaticamente. Para colunas ausentes, alguns gráficos podem não aparecer.")
-
-
