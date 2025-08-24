@@ -161,7 +161,7 @@ def _drive_download_bytes(file_id: str, mime_type: str) -> bytes:
         status, done = downloader.next_chunk()
     return buf.getvalue()
 
-def read_drive_folder(folder_id: str, preferred_sheet: str | None = None, mode: str = "latest") -> pd.DataFrame:
+def read_drive_folder(folder_id: str, preferred_sheet: str | None = None, mode: str = "concat") -> pd.DataFrame:
     """Lê arquivos (Excel/Google Sheets/CSV) de uma pasta do Drive.
     mode: 'latest' pega o mais recente; 'concat' concatena todos.
     """
@@ -833,4 +833,5 @@ with aba[5]:
 
 st.markdown("---")
 st.caption("© Vavivê — Dashboard de indicadores. Este app aceita variações de nomes de colunas e tenta normalizar automaticamente. Para colunas ausentes, alguns gráficos podem não aparecer.")
+
 
