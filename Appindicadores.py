@@ -275,12 +275,13 @@ GDRIVE_RECURSE = True        # busca também em subpastas
 
 # IDs das pastas (pegos das Secrets)
 FOLDER_IDS = {
-    "clientes":      st.secrets.get("GDRIVE_CLIENTES_FOLDER_ID", ""),
-    "profissionais": st.secrets.get("GDRIVE_PROFISSIONAIS_FOLDER_ID", ""),
-    "atendimentos":  st.secrets.get("GDRIVE_ATENDIMENTOS_FOLDER_ID", ""),
-    "receber":       st.secrets.get("GDRIVE_RECEBER_FOLDER_ID", ""),
-    "repasses":      st.secrets.get("GDRIVE_REPASSES_FOLDER_ID", ""),
+    "clientes":      "16-OwSOPszrkkXIUo5-jO9OruxPt6xlNB",
+    "profissionais": "1r14S65qfk6UUNDn0gX4Bihk2OjihsRft",
+    "atendimentos":  "1MRcXmVAx9V-4F41N9KkxaOX1UxuNCM0U",
+    "receber":       "1qKrwvrCU97LgKrh2waw5SmmnGVvPIxAX",
+    "repasses":      "1mm0PKdY1E7YYnU3ypR6k7aEmghvUhcvi",
 }
+
 
 st.sidebar.markdown("**Fonte:** Google Drive (configuração fixa)")
 
@@ -882,3 +883,4 @@ with aba[5]:
 
 st.markdown("---")
 st.caption("© Vavivê — Dashboard de indicadores.")
+
