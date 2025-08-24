@@ -3,43 +3,9 @@
 # Vavivê — Dashboard de Indicadores (Streamlit)
 # -------------------------------------------------------------
 # Como usar com GitHub + Streamlit Cloud:
-# 1) Crie um repositório com este arquivo como `app.py` (ou `Appindicadores.py`).
-# 2) Inclua um `requirements.txt` com:
-#    streamlit
-#    pandas
-#    numpy
-#    plotly
-#    openpyxl
-#    python-dateutil
-#    google-api-python-client
-#    google-auth
-#    google-auth-httplib2
-#    google-auth-oauthlib
-#    xlrd==1.2.0
-# 3) (Opcional) Suba também os arquivos .xlsx na raiz do repo com estes nomes:
-#    - Clientes.xlsx (1ª aba)
-#    - Profissionais.xlsx (1ª aba)
-#    - Atendimentos_202507.xlsx (aba "Clientes")
-#    - Receber_202507.xlsx (aba "Dados Financeiros")
-#    - Repasses_202507.xlsx (aba "Dados Financeiros")
-# 4) Para ler do Google Drive, adicione nas Secrets do Streamlit Cloud:
-#    [gdrive_service_account]
-#    type = "service_account"
-#    project_id = "..."
-#    private_key_id = "..."
-#    private_key = """
-#    -----BEGIN PRIVATE KEY-----
-#    ...
-#    -----END PRIVATE KEY-----
-#    """
-#    client_email = "svc@projeto.iam.gserviceaccount.com"
-#    token_uri = "https://oauth2.googleapis.com/token"
-#    E defina também os IDs das pastas:
-#    GDRIVE_CLIENTES_FOLDER_ID = "..."
-#    GDRIVE_PROFISSIONAIS_FOLDER_ID = "..."
-#    GDRIVE_ATENDIMENTOS_FOLDER_ID = "..."
-#    GDRIVE_RECEBER_FOLDER_ID = "..."
-#    GDRIVE_REPASSES_FOLDER_ID = "..."
+# 1) Salve este arquivo como `app.py` (ou `Appindicadores.py`) no seu repo.
+# 2) Inclua um `requirements.txt` (lista no final desta mensagem).
+# 3) No Streamlit Cloud, configure as Secrets com o template ao final.
 # -------------------------------------------------------------
 
 import streamlit as st
@@ -123,9 +89,7 @@ def coalesce_inplace(df: pd.DataFrame, candidates: list[str], new: str) -> pd.Da
 # -------------
 
 def get_drive_service():
-    """Cria o client do Google Drive e valida o token com uma chamada leve.
-    Exibe mensagens de erro úteis em caso de falha.
-    """
+    """Cria o client do Google Drive e valida o token com uma chamada leve."""
     if not USE_GDRIVE_LIBS:
         st.error("Bibliotecas Google não instaladas (google-api-python-client, google-auth, ...).")
         return None
@@ -219,7 +183,7 @@ def _drive_download_bytes(file_id: str, mime_type: str) -> bytes:
 
 
 def read_drive_folder(folder_id: str, preferred_sheet: str | None = None, mode: str = "latest", recurse: bool = False) -> pd.DataFrame:
-    """Lê arquivos (Excel/Google Sheets/CSV) de uma pasta do Drive (opcionalmente **recursiva**).
+    """Lê arquivos (Excel/Google Sheets/CSV) de uma pasta do Drive (opcionalmente recursiva).
     mode: 'latest' pega o mais recente; 'concat' concatena todos.
     """
     files = drive_list_files(folder_id, recurse=recurse)
@@ -248,12 +212,19 @@ def read_drive_folder(folder_id: str, preferred_sheet: str | None = None, mode: 
             if mt == "text/csv":
                 df = pd.read_csv(bio)
             elif mt == "application/vnd.ms-excel":
-                # XLS antigo → usar xlrd
-                if preferred_sheet is None:
+                # XLS antigo → tentar xlrd; se não houver, tenta sem engine
+                try:
                     xls = pd.ExcelFile(bio, engine="xlrd")
-                    df = pd.read_excel(xls, sheet_name=xls.sheet_names[0], engine="xlrd")
-                else:
-                    df = pd.read_excel(bio, sheet_name=preferred_sheet, engine="xlrd")
+                    first = xls.sheet_names[0] if preferred_sheet is None else preferred_sheet
+                    df = pd.read_excel(bio, sheet_name=first, engine="xlrd")
+                except Exception:
+                    first = None
+                    try:
+                        xls = pd.ExcelFile(bio)
+                        first = xls.sheet_names[0]
+                    except Exception:
+                        pass
+                    df = pd.read_excel(bio, sheet_name=(preferred_sheet or first))
             else:
                 # XLSX (ou Google Sheets exportado como XLSX)
                 if preferred_sheet is None:
@@ -298,14 +269,11 @@ def load_excel(uploaded_file, fallback_path=None, sheet=None) -> pd.DataFrame:
 # -------------------------------
 # Configuração fixa — Google Drive
 # -------------------------------
-# Leia SEM sidebar (pastas fixas do seu Drive compartilhado)
 USE_GDRIVE = True
-# Se houver mais de 1 arquivo por pasta: "concat" empilha todos; "latest" pega o mais recente
-GDRIVE_MODE = "concat"  # "concat" ou "latest"
-# Buscar também em subpastas (ex.: 2025/Julho)?
-GDRIVE_RECURSE = True
+GDRIVE_MODE = "concat"       # "concat" ou "latest"
+GDRIVE_RECURSE = True        # busca também em subpastas
 
-# Informe os FOLDER IDs das pastas (use Secrets ou coloque diretamente aqui)
+# IDs das pastas (pegos das Secrets)
 FOLDER_IDS = {
     "clientes":      st.secrets.get("GDRIVE_CLIENTES_FOLDER_ID", ""),
     "profissionais": st.secrets.get("GDRIVE_PROFISSIONAIS_FOLDER_ID", ""),
@@ -316,7 +284,7 @@ FOLDER_IDS = {
 
 st.sidebar.markdown("**Fonte:** Google Drive (configuração fixa)")
 
-# 🔧 Diagnóstico (temporário) — pode remover depois
+# 🔧 Diagnóstico (pode remover depois)
 with st.expander("🔧 Diagnóstico Google Drive"):
     st.write("Libs Google importadas?", USE_GDRIVE_LIBS)
     has_secret = "gdrive_service_account" in st.secrets
@@ -345,11 +313,11 @@ with st.expander("🔧 Diagnóstico Google Drive"):
 # Carregar dados conforme configuração fixa
 if USE_GDRIVE:
     mode = "concat" if GDRIVE_MODE.lower().startswith("concat") else "latest"
-    raw_clientes = read_drive_folder(FOLDER_IDS.get("clientes", ""),     preferred_sheet=None,               mode=mode, recurse=GDRIVE_RECURSE)
-    raw_prof     = read_drive_folder(FOLDER_IDS.get("profissionais", ""), preferred_sheet=None,               mode=mode, recurse=GDRIVE_RECURSE)
-    raw_atend    = read_drive_folder(FOLDER_IDS.get("atendimentos", ""),  preferred_sheet="Clientes",        mode=mode, recurse=GDRIVE_RECURSE)
-    raw_receber  = read_drive_folder(FOLDER_IDS.get("receber", ""),       preferred_sheet="Dados Financeiros",mode=mode, recurse=GDRIVE_RECURSE)
-    raw_repasses = read_drive_folder(FOLDER_IDS.get("repasses", ""),      preferred_sheet="Dados Financeiros",mode=mode, recurse=GDRIVE_RECURSE)
+    raw_clientes = read_drive_folder(FOLDER_IDS.get("clientes", ""),     preferred_sheet=None,                 mode=mode, recurse=GDRIVE_RECURSE)
+    raw_prof     = read_drive_folder(FOLDER_IDS.get("profissionais", ""), preferred_sheet=None,                 mode=mode, recurse=GDRIVE_RECURSE)
+    raw_atend    = read_drive_folder(FOLDER_IDS.get("atendimentos", ""),  preferred_sheet="Clientes",          mode=mode, recurse=GDRIVE_RECURSE)
+    raw_receber  = read_drive_folder(FOLDER_IDS.get("receber", ""),       preferred_sheet="Dados Financeiros", mode=mode, recurse=GDRIVE_RECURSE)
+    raw_repasses = read_drive_folder(FOLDER_IDS.get("repasses", ""),      preferred_sheet="Dados Financeiros", mode=mode, recurse=GDRIVE_RECURSE)
 else:
     # Fallback local (arquivos no repositório)
     raw_clientes = load_excel(None, "Clientes.xlsx")
@@ -913,6 +881,4 @@ with aba[5]:
             st.caption("Observação: quando a base não identificar a profissional via CPF, o app tenta conciliar por nome. Se ainda assim não encontrar, os campos do endereço da profissional podem aparecer vazios.")
 
 st.markdown("---")
-st.caption("© Vavivê — Dashboard de indicadores. Este app aceita variações de nomes de colunas e tenta normalizar automaticamente. Para colunas ausentes, alguns gráficos podem não aparecer.")
-
-         
+st.caption("© Vavivê — Dashboard de indicadores.")
