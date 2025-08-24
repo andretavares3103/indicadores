@@ -15,6 +15,7 @@
 #    google-auth
 #    google-auth-httplib2
 #    google-auth-oauthlib
+#    xlrd==1.2.0
 # 3) (Opcional) Suba também os arquivos .xlsx na raiz do repo com estes nomes:
 #    - Clientes.xlsx (1ª aba)
 #    - Profissionais.xlsx (1ª aba)
@@ -190,10 +191,16 @@ def read_drive_folder(folder_id: str, preferred_sheet: str | None = None, mode: 
         try:
             if mt == "text/csv":
                 df = pd.read_csv(bio)
-            else:
-                # Excel ou Google Sheets (exportado como xlsx)
+            elif mt == "application/vnd.ms-excel":
+                # XLS antigo → usar xlrd
                 if preferred_sheet is None:
-                    # pegar primeira aba
+                    xls = pd.ExcelFile(bio, engine="xlrd")
+                    df = pd.read_excel(xls, sheet_name=xls.sheet_names[0], engine="xlrd")
+                else:
+                    df = pd.read_excel(bio, sheet_name=preferred_sheet, engine="xlrd")
+            else:
+                # XLSX (ou Google Sheets exportado como XLSX)
+                if preferred_sheet is None:
                     xls = pd.ExcelFile(bio)
                     df = pd.read_excel(xls, sheet_name=xls.sheet_names[0])
                 else:
@@ -259,6 +266,20 @@ FOLDER_IDS = {
 # }
 
 st.sidebar.markdown("**Fonte:** Google Drive (configuração fixa)")
+
+# 🔧 Diagnóstico (temporário) — pode remover depois
+with st.expander("🔧 Diagnóstico Google Drive"):
+    svc = get_drive_service()
+    st.write("Service account autenticada?", bool(svc))
+    if svc:
+        for nome, fid in FOLDER_IDS.items():
+            try:
+                files = drive_list_files(fid)
+                st.write(f"{nome}: {len(files)} arquivo(s) visível(is)")
+                if files:
+                    st.write("Mais recente:", files[0].get("name"), files[0].get("modifiedTime"))
+            except Exception as e:
+                st.error(f"Falha ao listar {nome}: {e}")
 
 # Carregar dados conforme configuração fixa
 if USE_GDRIVE:
