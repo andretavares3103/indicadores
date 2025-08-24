@@ -4,8 +4,10 @@
 # -------------------------------------------------------------
 # Como usar com GitHub + Streamlit Cloud:
 # 1) Salve este arquivo como `app.py` (ou `Appindicadores.py`) no seu repo.
-# 2) Inclua um `requirements.txt` (lista no final desta mensagem).
-# 3) No Streamlit Cloud, configure as Secrets com o template ao final.
+# 2) Inclua um `requirements.txt` (lista ao final).
+# 3) No Streamlit Cloud, configure as Secrets (template ao final) com:
+#    - gdrive_service_account = JSON completo da service account
+#    - IDs das pastas GDRIVE_*_FOLDER_ID
 # -------------------------------------------------------------
 
 import streamlit as st
@@ -89,7 +91,7 @@ def coalesce_inplace(df: pd.DataFrame, candidates: list[str], new: str) -> pd.Da
 # -------------
 
 def get_drive_service():
-    """Cria o client do Google Drive e valida o token com uma chamada leve."""
+    """Cria o client do Drive e valida o acesso incluindo Shared Drives."""
     if not USE_GDRIVE_LIBS:
         st.error("Bibliotecas Google não instaladas (google-api-python-client, google-auth, ...).")
         return None
@@ -110,9 +112,15 @@ def get_drive_service():
             scopes=["https://www.googleapis.com/auth/drive.readonly"],
         )
         service = build("drive", "v3", credentials=creds, cache_discovery=False)
-        # Validação rápida de acesso
+        # Validação rápida (considerando Shared Drives)
         try:
-            service.files().list(pageSize=1, fields="files(id)").execute()
+            service.files().list(
+                pageSize=1,
+                fields="files(id)",
+                includeItemsFromAllDrives=True,
+                supportsAllDrives=True,
+                corpora="allDrives",
+            ).execute()
         except Exception as e:
             st.error(f"Falha acessando a API do Drive com a service account: {type(e).__name__}: {e}")
             return None
@@ -133,7 +141,14 @@ def drive_list_files(folder_id: str, recurse: bool = False, max_depth: int = 10)
         files = []
         page_token = None
         while True:
-            resp = service.files().list(q=q, fields=fields, pageToken=page_token).execute()
+            resp = service.files().list(
+                q=q,
+                fields=fields,
+                pageToken=page_token,
+                includeItemsFromAllDrives=True,
+                supportsAllDrives=True,
+                corpora="allDrives",
+            ).execute()
             files.extend(resp.get("files", []))
             page_token = resp.get("nextPageToken")
             if not page_token:
@@ -172,9 +187,13 @@ def _drive_download_bytes(file_id: str, mime_type: str) -> bytes:
         req = service.files().export_media(
             fileId=file_id,
             mimeType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            supportsAllDrives=True,  # <-- Shared Drives
         )
     else:
-        req = service.files().get_media(fileId=file_id)
+        req = service.files().get_media(
+            fileId=file_id,
+            supportsAllDrives=True,  # <-- Shared Drives
+        )
     downloader = MediaIoBaseDownload(buf, req)
     done = False
     while not done:
@@ -212,7 +231,7 @@ def read_drive_folder(folder_id: str, preferred_sheet: str | None = None, mode: 
             if mt == "text/csv":
                 df = pd.read_csv(bio)
             elif mt == "application/vnd.ms-excel":
-                # XLS antigo → tentar xlrd; se não houver, tenta sem engine
+                # XLS antigo → tentar xlrd; se faltar, tenta sem engine
                 try:
                     xls = pd.ExcelFile(bio, engine="xlrd")
                     first = xls.sheet_names[0] if preferred_sheet is None else preferred_sheet
@@ -275,13 +294,12 @@ GDRIVE_RECURSE = True        # busca também em subpastas
 
 # IDs das pastas (pegos das Secrets)
 FOLDER_IDS = {
-    "clientes":      "16-OwSOPszrkkXIUo5-jO9OruxPt6xlNB",
-    "profissionais": "1r14S65qfk6UUNDn0gX4Bihk2OjihsRft",
-    "atendimentos":  "1MRcXmVAx9V-4F41N9KkxaOX1UxuNCM0U",
-    "receber":       "1qKrwvrCU97LgKrh2waw5SmmnGVvPIxAX",
-    "repasses":      "1mm0PKdY1E7YYnU3ypR6k7aEmghvUhcvi",
+    "clientes":      st.secrets.get("GDRIVE_CLIENTES_FOLDER_ID", ""),
+    "profissionais": st.secrets.get("GDRIVE_PROFISSIONAIS_FOLDER_ID", ""),
+    "atendimentos":  st.secrets.get("GDRIVE_ATENDIMENTOS_FOLDER_ID", ""),
+    "receber":       st.secrets.get("GDRIVE_RECEBER_FOLDER_ID", ""),
+    "repasses":      st.secrets.get("GDRIVE_REPASSES_FOLDER_ID", ""),
 }
-
 
 st.sidebar.markdown("**Fonte:** Google Drive (configuração fixa)")
 
@@ -460,7 +478,7 @@ if not rec.empty or not rep.empty:
         "data_vencimento": "max" if "data_vencimento" in left.columns else (lambda s: np.nan),
         "situacao": _first_nonnull if "situacao" in left.columns else (lambda s: np.nan),
         "prof_cpf": _first_nonnull if "prof_cpf" in left.columns else (lambda s: np.nan),
-    }) if not left.empty else pd.DataFrame(columns=["os_id"]) 
+    }) if not left.empty else pd.DataFrame(columns=["os_id"])
 
     rep_ag = right.groupby("os_id", as_index=False).agg({
         "profissional_nome": _first_nonnull if "profissional_nome" in right.columns else (lambda s: np.nan),
@@ -469,7 +487,7 @@ if not rec.empty or not rep.empty:
         "data_vencimento_repasse": "max" if "data_vencimento_repasse" in right.columns else (lambda s: np.nan),
         "situacao_repasse": _first_nonnull if "situacao_repasse" in right.columns else (lambda s: np.nan),
         "prof_cpf": _first_nonnull if "prof_cpf" in right.columns else (lambda s: np.nan),
-    }) if not right.empty else pd.DataFrame(columns=["os_id"]) 
+    }) if not right.empty else pd.DataFrame(columns=["os_id"])
 
     fin = pd.merge(rec_ag, rep_ag, on="os_id", how="outer", suffixes=("_rec", "_rep"))
     if "valor_recebido" not in fin.columns:
@@ -557,7 +575,7 @@ if not fin_f.empty:
 pro_base = pd.DataFrame()
 if not pro.empty:
     if "prof_cpf" in pro.columns:
-        pro_base = pro[[c for c in ["prof_cpf", "prof_nome", "prof_rua", "prof_bairro", "prof_cidade", "prof_cep"] if c in pro.columns]].drop_duplicates(subset=["prof_cpf"]) 
+        pro_base = pro[[c for c in ["prof_cpf", "prof_nome", "prof_rua", "prof_bairro", "prof_cidade", "prof_cep"] if c in pro.columns]].drop_duplicates(subset=["prof_cpf"])
     else:
         pro_base = pro[[c for c in ["prof_nome", "prof_rua", "prof_bairro", "prof_cidade", "prof_cep"] if c in pro.columns]].drop_duplicates()
 
@@ -879,8 +897,7 @@ with aba[5]:
                 })
 
             st.markdown("---")
-            st.caption("Observação: quando a base não identificar a profissional via CPF, o app tenta conciliar por nome. Se ainda assim não encontrar, os campos do endereço da profissional podem aparecer vazios.")
+            st.caption("Observação: quando a base não identificar a profissional via CPF, o app tenta conciliar por nome.")
 
 st.markdown("---")
 st.caption("© Vavivê — Dashboard de indicadores.")
-
