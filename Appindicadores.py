@@ -105,24 +105,39 @@ def coalesce_inplace(df: pd.DataFrame, candidates: list[str], new: str) -> pd.Da
 # -------------
 # Google Drive
 # -------------
-@st.cache_data(show_spinner=False)
 def get_drive_service():
+    """Cria o client do Google Drive e valida o token com uma chamada leve.
+    Exibe mensagens de erro úteis em caso de falha.
+    """
     if not USE_GDRIVE_LIBS:
+        st.error("Bibliotecas Google não instaladas (google-api-python-client, google-auth, ...).")
         return None
     try:
         info = st.secrets.get("gdrive_service_account", None)
         if info is None:
+            st.error("Secret 'gdrive_service_account' não encontrada nas Secrets do app.")
             return None
         if isinstance(info, str):
             import json
             info = json.loads(info)
+        email = info.get("client_email", "")
+        if not email:
+            st.error("Campo 'client_email' ausente no JSON da service account nas Secrets.")
+            return None
         creds = service_account.Credentials.from_service_account_info(
             info,
             scopes=["https://www.googleapis.com/auth/drive.readonly"],
         )
         service = build("drive", "v3", credentials=creds, cache_discovery=False)
+        # Validação rápida de acesso
+        try:
+            service.files().list(pageSize=1, fields="files(id)").execute()
+        except Exception as e:
+            st.error(f"Falha acessando a API do Drive com a service account: {type(e).__name__}: {e}")
+            return None
         return service
-    except Exception:
+    except Exception as e:
+        st.error(f"Erro ao montar credenciais: {type(e).__name__}: {e}")
         return None
 
 @st.cache_data(ttl=600, show_spinner=False)
@@ -269,6 +284,18 @@ st.sidebar.markdown("**Fonte:** Google Drive (configuração fixa)")
 
 # 🔧 Diagnóstico (temporário) — pode remover depois
 with st.expander("🔧 Diagnóstico Google Drive"):
+    st.write("Libs Google importadas?", USE_GDRIVE_LIBS)
+    has_secret = "gdrive_service_account" in st.secrets
+    st.write("Secret presente?", has_secret)
+    if has_secret:
+        try:
+            import json
+            _info = st.secrets.get("gdrive_service_account")
+            if isinstance(_info, str):
+                _info = json.loads(_info)
+            st.write("client_email:", _info.get("client_email", "(vazio)"))
+        except Exception as e:
+            st.error(f"Erro lendo secret: {e}")
     svc = get_drive_service()
     st.write("Service account autenticada?", bool(svc))
     if svc:
