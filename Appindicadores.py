@@ -233,49 +233,48 @@ def load_excel(uploaded_file, fallback_path=None, sheet=None) -> pd.DataFrame:
         return pd.DataFrame()
 
 # -------------------------------
-# Sidebar — Fonte de dados e Filtros
+# Configuração fixa — Google Drive
 # -------------------------------
-with st.sidebar:
-    st.markdown("## 📥 Fonte de Dados")
-    fonte = st.radio("De onde ler as bases?", ["Arquivos locais / Upload", "Google Drive"], index=0)
+# Deixe USE_GDRIVE=True para ler SEM sidebar (pastas fixas do seu Drive compartilhado)
+USE_GDRIVE = True
+# Se houver mais de 1 arquivo por pasta: "concat" empilha todos; "latest" pega o mais recente
+GDRIVE_MODE = "concat"  # "concat" ou "latest"
 
-    if fonte == "Arquivos locais / Upload":
-        up_clientes = st.file_uploader("Clientes.xlsx", type=["xlsx"], key="clientes")
-        up_prof     = st.file_uploader("Profissionais.xlsx", type=["xlsx"], key="prof")
-        up_atend    = st.file_uploader("Atendimentos_2025MM.xlsx", type=["xlsx"], key="atend")
-        up_receber  = st.file_uploader("Receber_2025MM.xlsx", type=["xlsx"], key="receber")
-        up_repasses = st.file_uploader("Repasses_2025MM.xlsx", type=["xlsx"], key="repasses")
-        st.caption("Se não enviar, o app tenta ler arquivos com esses nomes na pasta do repositório.")
-        modo_drive = None
-        drive_ids = {}
-    else:
-        if not USE_GDRIVE_LIBS:
-            st.error("Bibliotecas do Google Drive não instaladas. Adicione-as ao requirements.txt.")
-        st.caption("Informe os **Folder IDs**. Abra cada pasta no Drive e copie o ID da URL.")
-        drive_ids = {
-            "clientes": st.text_input("Folder ID — Clientes", value=""),
-            "profissionais": st.text_input("Folder ID — Profissionais", value=""),
-            "atendimentos": st.text_input("Folder ID — Atendimentos", value=""),
-            "receber": st.text_input("Folder ID — Contas a receber", value=""),
-            "repasses": st.text_input("Folder ID — Repasses", value=""),
-        }
-        modo_drive = st.selectbox("Se houver vários arquivos por pasta...", ["Mais recente", "Concatenar todos"], index=0)
-        st.caption("Dica: compartilhe as pastas com o e-mail do service account nas Secrets.")
+# Informe os FOLDER IDs das pastas (use Secrets ou coloque diretamente aqui)
+FOLDER_IDS = {
+    "clientes":      st.secrets.get("GDRIVE_CLIENTES_FOLDER_ID", ""),
+    "profissionais": st.secrets.get("GDRIVE_PROFISSIONAIS_FOLDER_ID", ""),
+    "atendimentos":  st.secrets.get("GDRIVE_ATENDIMENTOS_FOLDER_ID", ""),
+    "receber":       st.secrets.get("GDRIVE_RECEBER_FOLDER_ID", ""),
+    "repasses":      st.secrets.get("GDRIVE_REPASSES_FOLDER_ID", ""),
+}
 
-# Carregar dados conforme fonte
-if fonte == "Arquivos locais / Upload":
-    raw_clientes = load_excel(up_clientes, "Clientes.xlsx")
-    raw_prof     = load_excel(up_prof, "Profissionais.xlsx")
-    raw_atend    = load_excel(up_atend, "Atendimentos_202507.xlsx", sheet="Clientes")
-    raw_receber  = load_excel(up_receber, "Receber_202507.xlsx", sheet="Dados Financeiros")
-    raw_repasses = load_excel(up_repasses, "Repasses_202507.xlsx", sheet="Dados Financeiros")
+# OPCIONAL: se preferir hardcode, remova o st.secrets acima e cole os IDs entre aspas:
+# FOLDER_IDS = {
+#   "clientes": "1AbC...",
+#   "profissionais": "1Def...",
+#   "atendimentos": "1GhI...",
+#   "receber": "1JkL...",
+#   "repasses": "1MnO...",
+# }
+
+st.sidebar.markdown("**Fonte:** Google Drive (configuração fixa)")
+
+# Carregar dados conforme configuração fixa
+if USE_GDRIVE:
+    mode = "concat" if GDRIVE_MODE.lower().startswith("concat") else "latest"
+    raw_clientes = read_drive_folder(FOLDER_IDS.get("clientes", ""),     preferred_sheet=None,               mode=mode)
+    raw_prof     = read_drive_folder(FOLDER_IDS.get("profissionais", ""), preferred_sheet=None,               mode=mode)
+    raw_atend    = read_drive_folder(FOLDER_IDS.get("atendimentos", ""),  preferred_sheet="Clientes",        mode=mode)
+    raw_receber  = read_drive_folder(FOLDER_IDS.get("receber", ""),       preferred_sheet="Dados Financeiros",mode=mode)
+    raw_repasses = read_drive_folder(FOLDER_IDS.get("repasses", ""),      preferred_sheet="Dados Financeiros",mode=mode)
 else:
-    mode = "concat" if modo_drive == "Concatenar todos" else "latest"
-    raw_clientes = read_drive_folder(drive_ids.get("clientes", ""), preferred_sheet=None,               mode=mode) if drive_ids else pd.DataFrame()
-    raw_prof     = read_drive_folder(drive_ids.get("profissionais", ""), preferred_sheet=None,           mode=mode) if drive_ids else pd.DataFrame()
-    raw_atend    = read_drive_folder(drive_ids.get("atendimentos", ""), preferred_sheet="Clientes",     mode=mode) if drive_ids else pd.DataFrame()
-    raw_receber  = read_drive_folder(drive_ids.get("receber", ""), preferred_sheet="Dados Financeiros", mode=mode) if drive_ids else pd.DataFrame()
-    raw_repasses = read_drive_folder(drive_ids.get("repasses", ""), preferred_sheet="Dados Financeiros",mode=mode) if drive_ids else pd.DataFrame()
+    # Fallback local (arquivos no repositório)
+    raw_clientes = load_excel(None, "Clientes.xlsx")
+    raw_prof     = load_excel(None, "Profissionais.xlsx")
+    raw_atend    = load_excel(None, "Atendimentos_202507.xlsx", sheet="Clientes")
+    raw_receber  = load_excel(None, "Receber_202507.xlsx", sheet="Dados Financeiros")
+    raw_repasses = load_excel(None, "Repasses_202507.xlsx", sheet="Dados Financeiros")
 
 # Normalizar colunas
 cli = normalize_columns(raw_clientes) if not raw_clientes.empty else pd.DataFrame()
