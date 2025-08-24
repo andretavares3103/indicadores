@@ -241,22 +241,23 @@ USE_GDRIVE = True
 GDRIVE_MODE = "concat"  # "concat" ou "latest"
 
 # Informe os FOLDER IDs das pastas (use Secrets ou coloque diretamente aqui)
-FOLDER_IDS = {
-    "clientes":      st.secrets.get("GDRIVE_CLIENTES_FOLDER_ID", ""),
-    "profissionais": st.secrets.get("GDRIVE_PROFISSIONAIS_FOLDER_ID", ""),
-    "atendimentos":  st.secrets.get("GDRIVE_ATENDIMENTOS_FOLDER_ID", ""),
-    "receber":       st.secrets.get("GDRIVE_RECEBER_FOLDER_ID", ""),
-    "repasses":      st.secrets.get("GDRIVE_REPASSES_FOLDER_ID", ""),
-}
+#FOLDER_IDS = {
+ #   "clientes":      st.secrets.get("GDRIVE_CLIENTES_FOLDER_ID", ""),
+  #  "profissionais": st.secrets.get("GDRIVE_PROFISSIONAIS_FOLDER_ID", ""),
+   # "atendimentos":  st.secrets.get("GDRIVE_ATENDIMENTOS_FOLDER_ID", ""),
+    #"receber":       st.secrets.get("GDRIVE_RECEBER_FOLDER_ID", ""),
+    #"repasses":      st.secrets.get("GDRIVE_REPASSES_FOLDER_ID", ""),
+#}
 
 # OPCIONAL: se preferir hardcode, remova o st.secrets acima e cole os IDs entre aspas:
-# FOLDER_IDS = {
-#   "clientes": "1AbC...",
-#   "profissionais": "1Def...",
-#   "atendimentos": "1GhI...",
-#   "receber": "1JkL...",
-#   "repasses": "1MnO...",
-# }
+FOLDER_IDS = {
+    "clientes": "16-OwSOPszrkkXIUo5-jO9OruxPt6xlNB",      # cole o ID da pasta
+    "profissionais": "1r14S65qfk6UUNDn0gX4Bihk2OjihsRft",
+    "atendimentos": "1MRcXmVAx9V-4F41N9KkxaOX1UxuNCM0U",
+    "receber": "1qKrwvrCU97LgKrh2waw5SmmnGVvPIxAX",
+    "repasses": "1mm0PKdY1E7YYnU3ypR6k7aEmghvUhcvi",
+}
+
 
 st.sidebar.markdown("**Fonte:** Google Drive (configuração fixa)")
 
@@ -832,3 +833,4 @@ with aba[5]:
 
 st.markdown("---")
 st.caption("© Vavivê — Dashboard de indicadores. Este app aceita variações de nomes de colunas e tenta normalizar automaticamente. Para colunas ausentes, alguns gráficos podem não aparecer.")
+
