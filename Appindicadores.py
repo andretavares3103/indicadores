@@ -2,12 +2,10 @@
 # -------------------------------------------------------------
 # Vavivê — Dashboard de Indicadores (Streamlit)
 # -------------------------------------------------------------
-# Como usar com GitHub + Streamlit Cloud:
-# 1) Salve este arquivo como `app.py` (ou `Appindicadores.py`) no seu repo.
-# 2) Inclua um `requirements.txt` (lista ao final).
-# 3) No Streamlit Cloud, configure as Secrets (template ao final) com:
-#    - gdrive_service_account = JSON completo da service account
-#    - IDs das pastas GDRIVE_*_FOLDER_ID
+# Fontes suportadas (selecionáveis na sidebar):
+#   1) Drive fixo (IDs nas Secrets)
+#   2) Drive (IDs na sidebar)
+#   3) Upload manual (arquivos .xlsx)
 # -------------------------------------------------------------
 
 import streamlit as st
@@ -42,21 +40,18 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# -------------------------------
-# Helpers de normalização e carga
-# -------------------------------
+# =============================================================
+# Helpers
+# =============================================================
 
 def _slug(s: str) -> str:
     if s is None:
         return ""
     s = unicodedata.normalize("NFKD", str(s)).encode("ascii", "ignore").decode("ascii")
-    s = s.strip().lower()
-    s = s.replace("/", " ")
+    s = s.strip().lower().replace("/", " ")
     for ch in ["(", ")", "[", "]", ",", ";", ":", "-", "."]:
         s = s.replace(ch, " ")
-    s = " ".join(s.split())
-    return s.replace(" ", "_")
-
+    return "_".join(s.split())
 
 def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
@@ -64,7 +59,6 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
         return df
     df.columns = [_slug(c) for c in df.columns]
     return df
-
 
 def try_parse_date(x):
     if pd.isna(x):
@@ -76,7 +70,6 @@ def try_parse_date(x):
     except Exception:
         return pd.NaT
 
-
 def coalesce_inplace(df: pd.DataFrame, candidates: list[str], new: str) -> pd.DataFrame:
     for c in candidates:
         if c in df.columns:
@@ -86,9 +79,9 @@ def coalesce_inplace(df: pd.DataFrame, candidates: list[str], new: str) -> pd.Da
         df[new] = np.nan
     return df
 
-# -------------
-# Google Drive — auth, listagem (recursiva) e leitura
-# -------------
+# =============================================================
+# Google Drive — auth/listagem/leitura (compatível com Shared Drives)
+# =============================================================
 
 def get_drive_service():
     """Cria o client do Drive e valida o acesso incluindo Shared Drives."""
@@ -98,35 +91,27 @@ def get_drive_service():
     try:
         info = st.secrets.get("gdrive_service_account", None)
         if info is None:
-            st.error("Secret 'gdrive_service_account' não encontrada nas Secrets do app.")
+            st.error("Secret 'gdrive_service_account' não encontrada.")
             return None
         if isinstance(info, str):
             import json
             info = json.loads(info)
-        email = info.get("client_email", "")
-        if not email:
-            st.error("Campo 'client_email' ausente no JSON/Secrets da service account.")
-            return None
         creds = service_account.Credentials.from_service_account_info(
             info,
             scopes=["https://www.googleapis.com/auth/drive.readonly"],
         )
         service = build("drive", "v3", credentials=creds, cache_discovery=False)
         # Validação rápida (considerando Shared Drives)
-        try:
-            service.files().list(
-                pageSize=1,
-                fields="files(id)",
-                includeItemsFromAllDrives=True,
-                supportsAllDrives=True,
-                corpora="allDrives",
-            ).execute()
-        except Exception as e:
-            st.error(f"Falha acessando a API do Drive com a service account: {type(e).__name__}: {e}")
-            return None
+        service.files().list(
+            pageSize=1,
+            fields="files(id)",
+            includeItemsFromAllDrives=True,
+            supportsAllDrives=True,
+            corpora="allDrives",
+        ).execute()
         return service
     except Exception as e:
-        st.error(f"Erro ao montar credenciais: {type(e).__name__}: {e}")
+        st.error(f"Falha autenticando no Drive: {type(e).__name__}: {e}")
         return None
 
 @st.cache_data(ttl=600, show_spinner=False)
@@ -177,7 +162,6 @@ def drive_list_files(folder_id: str, recurse: bool = False, max_depth: int = 10)
     results.sort(key=lambda x: x.get("modifiedTime", ""), reverse=True)
     return results
 
-
 def _drive_download_bytes(file_id: str, mime_type: str) -> bytes:
     service = get_drive_service()
     if service is None:
@@ -187,19 +171,18 @@ def _drive_download_bytes(file_id: str, mime_type: str) -> bytes:
         req = service.files().export_media(
             fileId=file_id,
             mimeType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            supportsAllDrives=True,  # <-- Shared Drives
+            supportsAllDrives=True,
         )
     else:
         req = service.files().get_media(
             fileId=file_id,
-            supportsAllDrives=True,  # <-- Shared Drives
+            supportsAllDrives=True,
         )
     downloader = MediaIoBaseDownload(buf, req)
     done = False
     while not done:
         status, done = downloader.next_chunk()
     return buf.getvalue()
-
 
 def read_drive_folder(folder_id: str, preferred_sheet: str | None = None, mode: str = "latest", recurse: bool = False) -> pd.DataFrame:
     """Lê arquivos (Excel/Google Sheets/CSV) de uma pasta do Drive (opcionalmente recursiva).
@@ -209,7 +192,6 @@ def read_drive_folder(folder_id: str, preferred_sheet: str | None = None, mode: 
     if not files:
         return pd.DataFrame()
 
-    # Tipos aceitos
     allowed = {
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
         "application/vnd.ms-excel": "xls",
@@ -231,7 +213,6 @@ def read_drive_folder(folder_id: str, preferred_sheet: str | None = None, mode: 
             if mt == "text/csv":
                 df = pd.read_csv(bio)
             elif mt == "application/vnd.ms-excel":
-                # XLS antigo → tentar xlrd; se faltar, tenta sem engine
                 try:
                     xls = pd.ExcelFile(bio, engine="xlrd")
                     first = xls.sheet_names[0] if preferred_sheet is None else preferred_sheet
@@ -245,7 +226,6 @@ def read_drive_folder(folder_id: str, preferred_sheet: str | None = None, mode: 
                         pass
                     df = pd.read_excel(bio, sheet_name=(preferred_sheet or first))
             else:
-                # XLSX (ou Google Sheets exportado como XLSX)
                 if preferred_sheet is None:
                     xls = pd.ExcelFile(bio)
                     df = pd.read_excel(xls, sheet_name=xls.sheet_names[0])
@@ -261,9 +241,9 @@ def read_drive_folder(folder_id: str, preferred_sheet: str | None = None, mode: 
         return pd.DataFrame()
     return pd.concat(dfs, ignore_index=True, sort=False) if mode == "concat" else dfs[0]
 
-# -------------
-# Local files (fallback)
-# -------------
+# =============================================================
+# Local files (upload)
+# =============================================================
 
 def load_excel(uploaded_file, fallback_path=None, sheet=None) -> pd.DataFrame:
     try:
@@ -285,15 +265,19 @@ def load_excel(uploaded_file, fallback_path=None, sheet=None) -> pd.DataFrame:
     except Exception:
         return pd.DataFrame()
 
-# -------------------------------
-# Configuração fixa — Google Drive
-# -------------------------------
-USE_GDRIVE = True
-GDRIVE_MODE = "concat"       # "concat" ou "latest"
-GDRIVE_RECURSE = True        # busca também em subpastas
+# =============================================================
+# Sidebar — seleção da fonte
+# =============================================================
 
-# IDs das pastas (pegos das Secrets)
-FOLDER_IDS = {
+st.sidebar.header("⚙️ Fonte dos dados")
+fonte = st.sidebar.radio(
+    "Escolha a origem:",
+    ["Drive fixo (Secrets)", "Drive (IDs na sidebar)", "Upload manual"],
+    index=0,
+)
+
+# Configurações padrão (Secrets)
+DEFAULT_FOLDER_IDS = {
     "clientes":      st.secrets.get("GDRIVE_CLIENTES_FOLDER_ID", ""),
     "profissionais": st.secrets.get("GDRIVE_PROFISSIONAIS_FOLDER_ID", ""),
     "atendimentos":  st.secrets.get("GDRIVE_ATENDIMENTOS_FOLDER_ID", ""),
@@ -301,9 +285,39 @@ FOLDER_IDS = {
     "repasses":      st.secrets.get("GDRIVE_REPASSES_FOLDER_ID", ""),
 }
 
-st.sidebar.markdown("**Fonte:** Google Drive (configuração fixa)")
+# Parâmetros comuns
+mode = st.sidebar.selectbox("Modo de leitura", ["concat (todos os arquivos)", "latest (apenas o mais recente)"], index=0)
+GDRIVE_MODE = "concat" if mode.startswith("concat") else "latest"
+GDRIVE_RECURSE = st.sidebar.checkbox("Buscar em subpastas (recursivo)", value=True)
 
-# 🔧 Diagnóstico (pode remover depois)
+# Inputs conforme a fonte
+uploaded = {}
+folder_ids = DEFAULT_FOLDER_IDS.copy()
+
+if fonte == "Drive (IDs na sidebar)":
+    st.sidebar.caption("Cole os IDs das pastas do Drive (ou deixe os que já vieram das Secrets).")
+    folder_ids["clientes"]      = st.sidebar.text_input("Pasta — Clientes",      DEFAULT_FOLDER_IDS["clientes"])
+    folder_ids["profissionais"] = st.sidebar.text_input("Pasta — Profissionais", DEFAULT_FOLDER_IDS["profissionais"])
+    folder_ids["atendimentos"]  = st.sidebar.text_input("Pasta — Atendimentos",  DEFAULT_FOLDER_IDS["atendimentos"])
+    folder_ids["receber"]       = st.sidebar.text_input("Pasta — Contas a Receber", DEFAULT_FOLDER_IDS["receber"])
+    folder_ids["repasses"]      = st.sidebar.text_input("Pasta — Repasses",      DEFAULT_FOLDER_IDS["repasses"])
+elif fonte == "Upload manual":
+    st.sidebar.caption("Envie os arquivos .xlsx (abas padrão podem ser alteradas abaixo).")
+    uploaded["clientes"] = st.sidebar.file_uploader("Clientes.xlsx", type=["xlsx", "xls", "csv"], key="up_cli")
+    uploaded["prof"]     = st.sidebar.file_uploader("Profissionais.xlsx", type=["xlsx", "xls", "csv"], key="up_pro")
+    uploaded["atend"]    = st.sidebar.file_uploader("Atendimentos_*.xlsx", type=["xlsx", "xls", "csv"], key="up_atd")
+    uploaded["receber"]  = st.sidebar.file_uploader("Receber_*.xlsx", type=["xlsx", "xls", "csv"], key="up_rec")
+    uploaded["repasses"] = st.sidebar.file_uploader("Repasses_*.xlsx", type=["xlsx", "xls", "csv"], key="up_rep")
+    st.sidebar.markdown("**Abas (opcional)**")
+    sheet_atd = st.sidebar.text_input("Aba de Atendimentos", "Clientes")
+    sheet_fin = st.sidebar.text_input("Aba de Financeiro (Receber/Repasses)", "Dados Financeiros")
+else:
+    # Drive fixo (Secrets)
+    pass
+
+# =============================================================
+# Diagnóstico
+# =============================================================
 with st.expander("🔧 Diagnóstico Google Drive"):
     st.write("Libs Google importadas?", USE_GDRIVE_LIBS)
     has_secret = "gdrive_service_account" in st.secrets
@@ -317,45 +331,46 @@ with st.expander("🔧 Diagnóstico Google Drive"):
             st.write("client_email:", _info.get("client_email", "(vazio)"))
         except Exception as e:
             st.error(f"Erro lendo secret: {e}")
-    svc = get_drive_service()
-    st.write("Service account autenticada?", bool(svc))
-    if svc:
-        for nome, fid in FOLDER_IDS.items():
-            try:
-                files = drive_list_files(fid, recurse=GDRIVE_RECURSE)
-                st.write(f"{nome}: {len(files)} arquivo(s) visível(is)")
-                if files:
-                    st.write("Mais recente:", files[0].get("name"), files[0].get("modifiedTime"))
-            except Exception as e:
-                st.error(f"Falha ao listar {nome}: {e}")
+    if fonte != "Upload manual":
+        svc = get_drive_service()
+        st.write("Service account autenticada?", bool(svc))
+        if svc:
+            for nome, fid in folder_ids.items():
+                try:
+                    files = drive_list_files(fid, recurse=GDRIVE_RECURSE)
+                    st.write(f"{nome}: {len(files)} arquivo(s) visível(is)")
+                    if files:
+                        st.write("Mais recente:", files[0].get("name"), files[0].get("modifiedTime"))
+                except Exception as e:
+                    st.error(f"Falha ao listar {nome}: {e}")
 
-# Carregar dados conforme configuração fixa
-if USE_GDRIVE:
-    mode = "concat" if GDRIVE_MODE.lower().startswith("concat") else "latest"
-    raw_clientes = read_drive_folder(FOLDER_IDS.get("clientes", ""),     preferred_sheet=None,                 mode=mode, recurse=GDRIVE_RECURSE)
-    raw_prof     = read_drive_folder(FOLDER_IDS.get("profissionais", ""), preferred_sheet=None,                 mode=mode, recurse=GDRIVE_RECURSE)
-    raw_atend    = read_drive_folder(FOLDER_IDS.get("atendimentos", ""),  preferred_sheet="Clientes",          mode=mode, recurse=GDRIVE_RECURSE)
-    raw_receber  = read_drive_folder(FOLDER_IDS.get("receber", ""),       preferred_sheet="Dados Financeiros", mode=mode, recurse=GDRIVE_RECURSE)
-    raw_repasses = read_drive_folder(FOLDER_IDS.get("repasses", ""),      preferred_sheet="Dados Financeiros", mode=mode, recurse=GDRIVE_RECURSE)
+# =============================================================
+# Carregar dados conforme a FONTE selecionada
+# =============================================================
+if fonte == "Upload manual":
+    raw_clientes = load_excel(uploaded.get("clientes"))
+    raw_prof     = load_excel(uploaded.get("prof"))
+    raw_atend    = load_excel(uploaded.get("atend"),    sheet=(sheet_atd or None))
+    raw_receber  = load_excel(uploaded.get("receber"),  sheet=(sheet_fin or None))
+    raw_repasses = load_excel(uploaded.get("repasses"), sheet=(sheet_fin or None))
 else:
-    # Fallback local (arquivos no repositório)
-    raw_clientes = load_excel(None, "Clientes.xlsx")
-    raw_prof     = load_excel(None, "Profissionais.xlsx")
-    raw_atend    = load_excel(None, "Atendimentos_202507.xlsx", sheet="Clientes")
-    raw_receber  = load_excel(None, "Receber_202507.xlsx", sheet="Dados Financeiros")
-    raw_repasses = load_excel(None, "Repasses_202507.xlsx", sheet="Dados Financeiros")
+    # Google Drive (via Secrets ou IDs na sidebar)
+    raw_clientes = read_drive_folder(folder_ids.get("clientes", ""),     preferred_sheet=None,                 mode=GDRIVE_MODE, recurse=GDRIVE_RECURSE)
+    raw_prof     = read_drive_folder(folder_ids.get("profissionais", ""), preferred_sheet=None,                 mode=GDRIVE_MODE, recurse=GDRIVE_RECURSE)
+    raw_atend    = read_drive_folder(folder_ids.get("atendimentos", ""),  preferred_sheet="Clientes",          mode=GDRIVE_MODE, recurse=GDRIVE_RECURSE)
+    raw_receber  = read_drive_folder(folder_ids.get("receber", ""),       preferred_sheet="Dados Financeiros", mode=GDRIVE_MODE, recurse=GDRIVE_RECURSE)
+    raw_repasses = read_drive_folder(folder_ids.get("repasses", ""),      preferred_sheet="Dados Financeiros", mode=GDRIVE_MODE, recurse=GDRIVE_RECURSE)
 
-# Normalizar colunas
+# =============================================================
+# Normalização das bases
+# =============================================================
 cli = normalize_columns(raw_clientes) if not raw_clientes.empty else pd.DataFrame()
 pro = normalize_columns(raw_prof)     if not raw_prof.empty     else pd.DataFrame()
 atd = normalize_columns(raw_atend)    if not raw_atend.empty    else pd.DataFrame()
 rec = normalize_columns(raw_receber)  if not raw_receber.empty  else pd.DataFrame()
 rep = normalize_columns(raw_repasses) if not raw_repasses.empty else pd.DataFrame()
 
-# -------------------------------
-# Padronização de nomes essenciais
-# -------------------------------
-# CLIENTES
+# ===================== Padronizações ==========================
 if not cli.empty:
     cli.rename(columns={
         "id": "cliente_id",
@@ -370,7 +385,6 @@ if not cli.empty:
         "origem": "origem_cliente",
     }, inplace=True)
 
-# PROFISSIONAIS
 if not pro.empty:
     pro.rename(columns={
         "id": "prof_id",
@@ -386,7 +400,6 @@ if not pro.empty:
     coalesce_inplace(pro, ["endereco_1_cep", "cep"], "prof_cep")
     pro = pro.loc[:, ~pro.columns.duplicated()]
 
-# ATENDIMENTOS (OS)
 if not atd.empty:
     coalesce_inplace(atd, ["os", "os_id", "atendimento_id"], "os_id")
     coalesce_inplace(atd, ["data_1", "data", "data_do_atendimento", "data_atendimento"], "data_atendimento")
@@ -405,7 +418,6 @@ if not atd.empty:
         atd["os_id"] = atd["os_id"].astype(str)
     atd = atd.loc[:, ~atd.columns.duplicated()]
 
-# RECEBER (Contas a Receber)
 if not rec.empty:
     coalesce_inplace(rec, ["atendimento_id", "os", "os_id"], "os_id")
     rec.rename(columns={
@@ -419,8 +431,7 @@ if not rec.empty:
         "profissional_celular": "prof_celular",
     }, inplace=True)
     if "situacao" in rec.columns and "status" in rec.columns:
-        rec["situacao"] = rec["situacao"].fillna(rec["status"])
-        rec.drop(columns=["status"], inplace=True)
+        rec["situacao"] = rec["situacao"].fillna(rec["status"]);  rec.drop(columns=["status"], inplace=True)
     elif "situacao" not in rec.columns and "status" in rec.columns:
         rec.rename(columns={"status": "situacao"}, inplace=True)
     if "data_pagamento" in rec.columns:
@@ -429,7 +440,6 @@ if not rec.empty:
         rec["data_vencimento"] = rec["data_vencimento"].apply(try_parse_date)
     rec = rec.loc[:, ~rec.columns.duplicated()]
 
-# REPASSES (Pagamentos às profissionais)
 if not rep.empty:
     coalesce_inplace(rep, ["atendimento_id", "os", "os_id"], "os_id")
     rep.rename(columns={
@@ -444,32 +454,26 @@ if not rep.empty:
         "cpf": "prof_cpf",
     }, inplace=True)
     if "situacao_repasse" not in rep.columns:
-        if "situacao" in rep.columns:
-            rep.rename(columns={"situacao": "situacao_repasse"}, inplace=True)
-        elif "status" in rep.columns:
-            rep.rename(columns={"status": "situacao_repasse"}, inplace=True)
+        if "situacao" in rep.columns: rep.rename(columns={"situacao": "situacao_repasse"}, inplace=True)
+        elif "status" in rep.columns: rep.rename(columns={"status": "situacao_repasse"}, inplace=True)
     else:
         for _c in ["situacao", "status"]:
-            if _c in rep.columns:
-                rep.drop(columns=[_c], inplace=True)
+            if _c in rep.columns: rep.drop(columns=[_c], inplace=True)
     for dtc in ["data_pagamento_repasse", "data_vencimento_repasse"]:
-        if dtc in rep.columns:
-            rep[dtc] = rep[dtc].apply(try_parse_date)
+        if dtc in rep.columns: rep[dtc] = rep[dtc].apply(try_parse_date)
     rep = rep.loc[:, ~rep.columns.duplicated()]
 
-# -------------------------------
-# Montagem Financeira: Receita x Repasse x Margem (por OS)
-# -------------------------------
+# =============================================================
+# Montagem financeira (por OS)
+# =============================================================
 fin = pd.DataFrame()
 if not rec.empty or not rep.empty:
-    left = rec.copy() if not rec.empty else pd.DataFrame(columns=["os_id"])  # Contas a Receber
-    right = rep.copy() if not rep.empty else pd.DataFrame(columns=["os_id"]) # Repasses
-
+    left = rec.copy() if not rec.empty else pd.DataFrame(columns=["os_id"])
+    right = rep.copy() if not rep.empty else pd.DataFrame(columns=["os_id"])
     left["os_id"] = left["os_id"].astype(str)
     right["os_id"] = right["os_id"].astype(str)
 
-    def _first_nonnull(s):
-        return s.dropna().iloc[0] if s.dropna().size else np.nan
+    def _first_nonnull(s): return s.dropna().iloc[0] if s.dropna().size else np.nan
 
     rec_ag = left.groupby("os_id", as_index=False).agg({
         "cliente_nome": _first_nonnull if "cliente_nome" in left.columns else (lambda s: np.nan),
@@ -490,16 +494,14 @@ if not rec.empty or not rep.empty:
     }) if not right.empty else pd.DataFrame(columns=["os_id"])
 
     fin = pd.merge(rec_ag, rep_ag, on="os_id", how="outer", suffixes=("_rec", "_rep"))
-    if "valor_recebido" not in fin.columns:
-        fin["valor_recebido"] = np.nan
-    if "valor_repasse" not in fin.columns:
-        fin["valor_repasse"] = np.nan
+    if "valor_recebido" not in fin.columns: fin["valor_recebido"] = np.nan
+    if "valor_repasse" not in fin.columns: fin["valor_repasse"] = np.nan
     fin["mc"] = fin["valor_recebido"].fillna(0) - fin["valor_repasse"].fillna(0)
     fin = fin.loc[:, ~fin.columns.duplicated()]
 
-# -------------------------------
-# Filtros Globais por Data
-# -------------------------------
+# =============================================================
+# Filtros globais por data
+# =============================================================
 all_dates = []
 for _df, cols in [
     (atd, ["data_atendimento"]),
@@ -513,12 +515,9 @@ for _df, cols in [
                 all_dates.extend(list(vals.dropna()))
 
 if all_dates:
-    dmin = min(all_dates).date()
-    dmax = max(all_dates).date()
+    dmin = min(all_dates).date(); dmax = max(all_dates).date()
 else:
-    today = date.today()
-    dmin = date(today.year, 1, 1)
-    dmax = today
+    today = date.today(); dmin = date(today.year, 1, 1); dmax = today
 
 with st.sidebar:
     st.markdown("---")
@@ -560,9 +559,9 @@ if not fin_f.empty:
         fin_f["_data"] = fin_f["_data"].fillna(fin_f["data_pagamento_repasse"]).fillna(fin_f.get("data_vencimento_repasse"))
     fin_f = fin_f[(pd.to_datetime(fin_f["_data"], errors="coerce") >= pd.to_datetime(sel_ini)) & (pd.to_datetime(fin_f["_data"], errors="coerce") <= pd.to_datetime(sel_fim))]
 
-# -------------------------------
-# Views auxiliares — OS unificada
-# -------------------------------
+# =============================================================
+# View auxiliar — OS unificada (Atend + Financeiro + Prof)
+# =============================================================
 atd_base = pd.DataFrame()
 if not atd_f.empty:
     keep_cols = [c for c in ["os_id", "cliente_nome", "data_atendimento", "valor_atendimento", "endereco", "rua", "bairro", "cidade", "cep", "complemento"] if c in atd_f.columns]
@@ -579,22 +578,16 @@ if not pro.empty:
     else:
         pro_base = pro[[c for c in ["prof_nome", "prof_rua", "prof_bairro", "prof_cidade", "prof_cep"] if c in pro.columns]].drop_duplicates()
 
-# Montar visão consolidada por OS
 os_view = pd.DataFrame()
 if not atd_base.empty or not fin_base.empty:
-    if "os_id" in atd_base.columns:
-        atd_base["os_id"] = atd_base["os_id"].astype(str)
-    if "os_id" in fin_base.columns:
-        fin_base["os_id"] = fin_base["os_id"].astype(str)
+    if "os_id" in atd_base.columns: atd_base["os_id"] = atd_base["os_id"].astype(str)
+    if "os_id" in fin_base.columns: fin_base["os_id"] = fin_base["os_id"].astype(str)
 
     if ("os_id" in atd_base.columns) and ("os_id" in fin_base.columns):
         os_view = pd.merge(atd_base, fin_base, on="os_id", how="outer")
     else:
         common = [c for c in ["cliente_nome"] if (c in atd_base.columns) and (c in fin_base.columns)]
-        if common:
-            os_view = pd.merge(atd_base, fin_base, on=common, how="outer")
-        else:
-            os_view = pd.concat([atd_base.reset_index(drop=True), fin_base.reset_index(drop=True)], axis=1)
+        os_view = pd.merge(atd_base, fin_base, on=common, how="outer") if common else pd.concat([atd_base.reset_index(drop=True), fin_base.reset_index(drop=True)], axis=1)
 
     if not pro_base.empty:
         if ("prof_cpf" in os_view.columns) and ("prof_cpf" in pro_base.columns):
@@ -604,15 +597,15 @@ if not atd_base.empty or not fin_base.empty:
 
     os_view = os_view.loc[:, ~os_view.columns.duplicated()]
 
-# -------------------------------
+# =============================================================
 # UI — TABS
-# -------------------------------
+# =============================================================
 st.title("Indicadores — Vavivê")
 
 if all([df.empty for df in [cli, pro, atd, rec, rep]]):
     st.info("Envie/aponte as bases para visualizar os indicadores.")
 
-aba = st.tabs([
+tabs = st.tabs([
     "📋 Visão Geral",
     "👥 Clientes & Regiões",
     "🧑‍💼 Profissionais",
@@ -621,15 +614,11 @@ aba = st.tabs([
     "🔎 OS — Detalhe",
 ])
 
-# ---------------------------------
-# 📋 Visão Geral
-# ---------------------------------
-with aba[0]:
+# Visão Geral
+with tabs[0]:
     st.subheader("KPIs do Período")
-
     total_clientes = int(cli.shape[0]) if not cli.empty else 0
     total_prof = int(pro.shape[0]) if not pro.empty else 0
-
     concl = int(atd_f[atd_f.get("status_servico").fillna("").str.lower().eq("concluido")].shape[0]) if not atd_f.empty and "status_servico" in atd_f.columns else 0
     agend = int(atd_f[atd_f.get("status_servico").fillna("").str.lower().eq("agendado")].shape[0]) if not atd_f.empty and "status_servico" in atd_f.columns else 0
     canc  = int(atd_f[atd_f.get("status_servico").fillna("").str.lower().eq("cancelado")].shape[0]) if not atd_f.empty and "status_servico" in atd_f.columns else 0
@@ -649,27 +638,16 @@ with aba[0]:
     st.markdown("---")
     st.caption("MC = Receita (Contas a Receber) − Repasses às Profissionais.")
 
-# ---------------------------------
-# 👥 Clientes & Regiões
-# ---------------------------------
-with aba[1]:
+# Clientes & Regiões
+with tabs[1]:
     st.subheader("Clientes")
-
     if cli.empty:
         st.warning("Base de Clientes não carregada.")
     else:
-        col_origem = None
-        for c in ["origem_cliente", "origem"]:
-            if c in cli.columns:
-                col_origem = c
-                break
+        col_origem = next((c for c in ["origem_cliente", "origem"] if c in cli.columns), None)
         if col_origem:
             origem_counts = (
-                cli[col_origem]
-                .fillna("(não informado)")
-                .replace({"": "(não informado)"})
-                .value_counts()
-                .reset_index()
+                cli[col_origem].fillna("(não informado)").replace({"": "(não informado)"}).value_counts().reset_index()
             )
             origem_counts.columns = ["origem", "quantidade"]
             if USE_PLOTLY:
@@ -682,18 +660,11 @@ with aba[1]:
 
         st.markdown("---")
         st.subheader("Regiões")
-        col_bairro = None
-        for c in ["bairro", "endereco_bairro", "endereco-1-bairro"]:
-            cc = _slug(c)
-            if cc in cli.columns:
-                col_bairro = cc
-                break
+        col_bairro = next((cc for c in ["bairro", "endereco_bairro", "endereco-1-bairro"] if (cc := _slug(c)) in cli.columns), None)
         col_cidade = "cidade" if "cidade" in cli.columns else None
-
         cols = st.columns(2)
         if col_bairro:
-            bairro_counts = cli[col_bairro].fillna("(sem bairro)").astype(str)
-            bairro_counts = bairro_counts.replace({"": "(sem bairro)"}).value_counts().reset_index()
+            bairro_counts = cli[col_bairro].fillna("(sem bairro)").astype(str).replace({"": "(sem bairro)"}).value_counts().reset_index()
             bairro_counts.columns = ["bairro", "clientes"]
             if USE_PLOTLY:
                 fig_b = px.bar(bairro_counts.head(20), x="bairro", y="clientes", title="Top Bairros por Clientes", text_auto=True)
@@ -702,10 +673,8 @@ with aba[1]:
                 cols[0].bar_chart(bairro_counts.set_index("bairro")["clientes"])
         else:
             cols[0].info("Coluna de bairro não encontrada.")
-
         if col_cidade:
-            cidade_counts = cli[col_cidade].fillna("(sem cidade)").astype(str)
-            cidade_counts = cidade_counts.replace({"": "(sem cidade)"}).value_counts().reset_index()
+            cidade_counts = cli[col_cidade].fillna("(sem cidade)").astype(str).replace({"": "(sem cidade)"}).value_counts().reset_index()
             cidade_counts.columns = ["cidade", "clientes"]
             if USE_PLOTLY:
                 fig_c = px.bar(cidade_counts, x="cidade", y="clientes", title="Clientes por Cidade", text_auto=True)
@@ -715,46 +684,38 @@ with aba[1]:
         else:
             cols[1].info("Coluna de cidade não encontrada.")
 
-# ---------------------------------
-# 🧑‍💼 Profissionais
-# ---------------------------------
-with aba[2]:
+# Profissionais
+with tabs[2]:
     st.subheader("Profissionais")
-
     if pro.empty and atd_f.empty:
         st.warning("Bases de Profissionais e Atendimentos não carregadas.")
     else:
         cols = st.columns(3)
         total_prof = int(pro.shape[0]) if not pro.empty else 0
         cols[0].metric("Total de Profissionais (cadastro)", f"{total_prof:,}".replace(",", "."))
-
         if not atd_f.empty and "status_servico" in atd_f.columns:
-            concluidos = atd_f[atd_f["status_servico"].str.lower() == "concluido"].copy()
+            concluidos = atd_f[atd_f["status_servico"].str.lower() == "concluido"]
             cols[1].metric("Atendimentos Concluídos (período)", f"{concluidos.shape[0]:,}".replace(",", "."))
         else:
             cols[1].metric("Atendimentos Concluídos (período)", "0")
-
-        if not pro.empty and {"att_feitos", "att_recusados"}.issubset(set(pro.columns)):
+        if not pro.empty and {"att_feitos", "att_recusados"} <= set(pro.columns):
             feitos = pro["att_feitos"].fillna(0).astype(float).sum()
             recusados = pro["att_recusados"].fillna(0).astype(float).sum()
-            taxa_recusa = (recusados / (feitos + recusados) * 100) if (feitos + recusados) > 0 else 0
-            cols[2].metric("Taxa de Recusa (cadastro)", f"{taxa_recusa:.1f}%")
+            taxa = (recusados / (feitos + recusados) * 100) if (feitos + recusados) > 0 else 0
+            cols[2].metric("Taxa de Recusa (cadastro)", f"{taxa:.1f}%")
         else:
             cols[2].metric("Taxa de Recusa (cadastro)", "—")
 
         st.markdown("---")
         st.caption("Quando a OS trouxer o ID/CPF da profissional, o ranking detalhado aparecerá aqui.")
 
-# ---------------------------------
-# 🧹 Atendimentos
-# ---------------------------------
-with aba[3]:
+# Atendimentos
+with tabs[3]:
     st.subheader("Atendimentos")
-
     if atd_f.empty:
         st.warning("Base de Atendimentos não carregada ou sem dados no período.")
     else:
-        if "data_atendimento" in atd_f.columns and "status_servico" in atd_f.columns:
+        if {"data_atendimento", "status_servico"} <= set(atd_f.columns):
             tmp = atd_f.copy()
             tmp["dia"] = tmp["data_atendimento"].dt.to_period("D").dt.to_timestamp()
             serie = tmp.groupby(["dia", "status_servico"]).size().reset_index(name="qtd")
@@ -769,7 +730,6 @@ with aba[3]:
         concl = int(atd_f[atd_f.get("status_servico").fillna("").str.lower().eq("concluido")].shape[0]) if "status_servico" in atd_f.columns else 0
         agend = int(atd_f[atd_f.get("status_servico").fillna("").str.lower().eq("agendado")].shape[0]) if "status_servico" in atd_f.columns else 0
         canc  = int(atd_f[atd_f.get("status_servico").fillna("").str.lower().eq("cancelado")].shape[0]) if "status_servico" in atd_f.columns else 0
-
         total = concl + agend + canc
         taxa_cancel = (canc / total * 100) if total > 0 else 0
         cols[0].metric("Concluídos", f"{concl:,}".replace(",", "."))
@@ -779,12 +739,9 @@ with aba[3]:
         st.markdown("---")
         st.dataframe(atd_f.head(200))
 
-# ---------------------------------
-# 💰 Financeiro (Receber & Repasses)
-# ---------------------------------
-with aba[4]:
+# Financeiro
+with tabs[4]:
     st.subheader("Receita, Repasses e Margem de Contribuição")
-
     if fin_f.empty and rec_f.empty and rep_f.empty:
         st.warning("Bases financeiras não carregadas.")
     else:
@@ -796,9 +753,8 @@ with aba[4]:
         c1.metric("Receita no período", f"R$ {receita:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
         c2.metric("Repasses no período", f"R$ {repasses:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
         c3.metric("Margem de Contribuição", f"R$ {mc_total:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
-
         inad = 0
-        if not rec_f.empty and {"data_vencimento", "data_pagamento"}.issubset(set(rec_f.columns)):
+        if not rec_f.empty and {"data_vencimento", "data_pagamento"} <= set(rec_f.columns):
             hoje = pd.Timestamp.today().normalize()
             pend = rec_f[(rec_f["data_pagamento"].isna()) & (pd.to_datetime(rec_f["data_vencimento"], errors="coerce") < hoje)]
             inad = float(pend.get("valor_recebido").sum()) if "valor_recebido" in pend.columns else 0.0
@@ -816,63 +772,47 @@ with aba[4]:
             st.dataframe(fin_view[show_cols].sort_values("mc", ascending=False).reset_index(drop=True))
 
         charts = st.columns(2)
-        if not rec_f.empty and "valor_recebido" in rec_f.columns:
+        if not rec_f.empty and "valor_recebido" in rec_f.columns and "data_pagamento" in rec_f.columns:
             rec_serie = rec_f.copy()
-            if "data_pagamento" in rec_serie.columns:
-                rec_serie["mes"] = pd.to_datetime(rec_serie["data_pagamento"], errors="coerce").dt.to_period("M").dt.to_timestamp()
-                g = rec_serie.groupby("mes")["valor_recebido"].sum().reset_index()
-                if USE_PLOTLY:
-                    fig_r = px.bar(g, x="mes", y="valor_recebido", title="Receita por Mês")
-                    charts[0].plotly_chart(fig_r, use_container_width=True)
-                else:
-                    charts[0].bar_chart(g.set_index("mes")["valor_recebido"])
-
-        if not rep_f.empty and "valor_repasse" in rep_f.columns:
+            rec_serie["mes"] = pd.to_datetime(rec_serie["data_pagamento"], errors="coerce").dt.to_period("M").dt.to_timestamp()
+            g = rec_serie.groupby("mes")["valor_recebido"].sum().reset_index()
+            if USE_PLOTLY:
+                charts[0].plotly_chart(px.bar(g, x="mes", y="valor_recebido", title="Receita por Mês"), use_container_width=True)
+            else:
+                charts[0].bar_chart(g.set_index("mes")["valor_recebido"])
+        if not rep_f.empty and "valor_repasse" in rep_f.columns and "data_pagamento_repasse" in rep_f.columns:
             rep_serie = rep_f.copy()
-            base_col = "data_pagamento_repasse" if "data_pagamento_repasse" in rep_serie.columns else None
-            if base_col:
-                rep_serie["mes"] = pd.to_datetime(rep_serie[base_col], errors="coerce").dt.to_period("M").dt.to_timestamp()
-                g2 = rep_serie.groupby("mes")["valor_repasse"].sum().reset_index()
-                if USE_PLOTLY:
-                    fig_p = px.bar(g2, x="mes", y="valor_repasse", title="Repasses por Mês")
-                    charts[1].plotly_chart(fig_p, use_container_width=True)
-                else:
-                    charts[1].bar_chart(g2.set_index("mes")["valor_repasse"])
+            rep_serie["mes"] = pd.to_datetime(rep_serie["data_pagamento_repasse"], errors="coerce").dt.to_period("M").dt.to_timestamp()
+            g2 = rep_serie.groupby("mes")["valor_repasse"].sum().reset_index()
+            if USE_PLOTLY:
+                charts[1].plotly_chart(px.bar(g2, x="mes", y="valor_repasse", title="Repasses por Mês"), use_container_width=True)
+            else:
+                charts[1].bar_chart(g2.set_index("mes")["valor_repasse"])
 
-# ---------------------------------
-# 🔎 OS — Detalhe (filtro por OS)
-# ---------------------------------
-with aba[5]:
+# OS — Detalhe
+with tabs[5]:
     st.subheader("Consulta por OS (Atendimento)")
-
     if os_view.empty:
         st.info("Não há dados suficientes para a visão por OS. Garanta Atendimentos, Receber e Repasses carregados.")
     else:
         os_view["os_id"] = os_view["os_id"].astype(str)
-        opcoes_os = sorted(os_view["os_id"].dropna().unique().tolist())
-
-        sel_os = st.selectbox("Selecione a OS", options=opcoes_os, index=0 if opcoes_os else None)
+        sel_os = st.selectbox("Selecione a OS", options=sorted(os_view["os_id"].dropna().unique().tolist()))
         registro = os_view[os_view["os_id"] == str(sel_os)].copy()
-
         if registro.empty:
             st.warning("OS não encontrada na seleção.")
         else:
             reg = registro.iloc[0]
-
             v_atend = float(reg.get("valor_atendimento", np.nan)) if not pd.isna(reg.get("valor_atendimento", np.nan)) else np.nan
             v_pago  = float(reg.get("valor_recebido", 0) or 0)
             v_rep   = float(reg.get("valor_repasse", 0) or 0)
             mc      = float(reg.get("mc", v_pago - v_rep))
-
             k1, k2, k3, k4 = st.columns(4)
             k1.metric("Valor do Atendimento", ("R$ %0.2f" % v_atend).replace(".", ",") if not np.isnan(v_atend) else "—")
             k2.metric("Valor Pago (Recebido)", ("R$ %0.2f" % v_pago).replace(".", ","))
             k3.metric("Repasse", ("R$ %0.2f" % v_rep).replace(".", ","))
             k4.metric("MC (Pago − Repasse)", ("R$ %0.2f" % mc).replace(".", ","))
-
             st.markdown("---")
             c1, c2 = st.columns(2)
-
             with c1:
                 st.markdown("### Cliente & Atendimento")
                 st.write({
@@ -884,7 +824,6 @@ with aba[5]:
                     "Cidade": reg.get("cidade"),
                     "CEP": reg.get("cep"),
                 })
-
             with c2:
                 st.markdown("### Profissional & Repasse")
                 st.write({
@@ -896,8 +835,5 @@ with aba[5]:
                     "CEP Profissional": reg.get("prof_cep"),
                 })
 
-            st.markdown("---")
-            st.caption("Observação: quando a base não identificar a profissional via CPF, o app tenta conciliar por nome.")
-
 st.markdown("---")
-st.caption("© Vavivê — Dashboard de indicadores.")
+st.caption("© Vavivê — Dashboard de indicadores. Suporta Drive Compartilhado (IDs/Secrets), edição via sidebar ou upload local.")
