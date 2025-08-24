@@ -23,9 +23,23 @@
 #    - Receber_202507.xlsx (aba "Dados Financeiros")
 #    - Repasses_202507.xlsx (aba "Dados Financeiros")
 # 4) Para ler do Google Drive, adicione nas Secrets do Streamlit Cloud:
-#    Chave: gdrive_service_account
-#    Valor: cole o JSON COMPLETO do Service Account (como texto). ✱Não cole o JSON diretamente neste arquivo .py✱
-#    Depois, compartilhe as pastas do Drive com o e-mail do service account (permissão Leitor).
+#    [gdrive_service_account]
+#    type = "service_account"
+#    project_id = "..."
+#    private_key_id = "..."
+#    private_key = """
+#    -----BEGIN PRIVATE KEY-----
+#    ...
+#    -----END PRIVATE KEY-----
+#    """
+#    client_email = "svc@projeto.iam.gserviceaccount.com"
+#    token_uri = "https://oauth2.googleapis.com/token"
+#    E defina também os IDs das pastas:
+#    GDRIVE_CLIENTES_FOLDER_ID = "..."
+#    GDRIVE_PROFISSIONAIS_FOLDER_ID = "..."
+#    GDRIVE_ATENDIMENTOS_FOLDER_ID = "..."
+#    GDRIVE_RECEBER_FOLDER_ID = "..."
+#    GDRIVE_REPASSES_FOLDER_ID = "..."
 # -------------------------------------------------------------
 
 import streamlit as st
@@ -78,6 +92,8 @@ def _slug(s: str) -> str:
 
 def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
+    if df.empty:
+        return df
     df.columns = [_slug(c) for c in df.columns]
     return df
 
@@ -103,8 +119,9 @@ def coalesce_inplace(df: pd.DataFrame, candidates: list[str], new: str) -> pd.Da
     return df
 
 # -------------
-# Google Drive
+# Google Drive — auth, listagem (recursiva) e leitura
 # -------------
+
 def get_drive_service():
     """Cria o client do Google Drive e valida o token com uma chamada leve.
     Exibe mensagens de erro úteis em caso de falha.
@@ -122,7 +139,7 @@ def get_drive_service():
             info = json.loads(info)
         email = info.get("client_email", "")
         if not email:
-            st.error("Campo 'client_email' ausente no JSON da service account nas Secrets.")
+            st.error("Campo 'client_email' ausente no JSON/Secrets da service account.")
             return None
         creds = service_account.Credentials.from_service_account_info(
             info,
@@ -141,23 +158,46 @@ def get_drive_service():
         return None
 
 @st.cache_data(ttl=600, show_spinner=False)
-def drive_list_files(folder_id: str):
+def drive_list_files(folder_id: str, recurse: bool = False, max_depth: int = 10):
     service = get_drive_service()
     if service is None or not folder_id:
         return []
-    q = f"'{folder_id}' in parents and trashed = false"
-    fields = "nextPageToken, files(id, name, mimeType, modifiedTime)"
-    files = []
-    page_token = None
-    while True:
-        resp = service.files().list(q=q, fields=fields, pageToken=page_token).execute()
-        files.extend(resp.get("files", []))
-        page_token = resp.get("nextPageToken")
-        if not page_token:
-            break
-    # ordenar por modifiedTime desc
-    files.sort(key=lambda x: x.get("modifiedTime", ""), reverse=True)
-    return files
+
+    def _list_children(fid):
+        q = f"'{fid}' in parents and trashed = false"
+        fields = "nextPageToken, files(id, name, mimeType, modifiedTime)"
+        files = []
+        page_token = None
+        while True:
+            resp = service.files().list(q=q, fields=fields, pageToken=page_token).execute()
+            files.extend(resp.get("files", []))
+            page_token = resp.get("nextPageToken")
+            if not page_token:
+                break
+        return files
+
+    results = []
+    if not recurse:
+        results = _list_children(folder_id)
+    else:
+        # BFS em subpastas
+        queue = [(folder_id, 0)]
+        while queue:
+            fid, depth = queue.pop(0)
+            try:
+                children = _list_children(fid)
+            except Exception:
+                children = []
+            for item in children:
+                if item.get("mimeType") == "application/vnd.google-apps.folder":
+                    if depth < max_depth:
+                        queue.append((item.get("id"), depth + 1))
+                else:
+                    results.append(item)
+
+    results.sort(key=lambda x: x.get("modifiedTime", ""), reverse=True)
+    return results
+
 
 def _drive_download_bytes(file_id: str, mime_type: str) -> bytes:
     service = get_drive_service()
@@ -177,15 +217,16 @@ def _drive_download_bytes(file_id: str, mime_type: str) -> bytes:
         status, done = downloader.next_chunk()
     return buf.getvalue()
 
-def read_drive_folder(folder_id: str, preferred_sheet: str | None = None, mode: str = "latest") -> pd.DataFrame:
-    """Lê arquivos (Excel/Google Sheets/CSV) de uma pasta do Drive.
+
+def read_drive_folder(folder_id: str, preferred_sheet: str | None = None, mode: str = "latest", recurse: bool = False) -> pd.DataFrame:
+    """Lê arquivos (Excel/Google Sheets/CSV) de uma pasta do Drive (opcionalmente **recursiva**).
     mode: 'latest' pega o mais recente; 'concat' concatena todos.
     """
-    files = drive_list_files(folder_id)
+    files = drive_list_files(folder_id, recurse=recurse)
     if not files:
         return pd.DataFrame()
 
-    # Aceitar estes tipos
+    # Tipos aceitos
     allowed = {
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
         "application/vnd.ms-excel": "xls",
@@ -231,7 +272,7 @@ def read_drive_folder(folder_id: str, preferred_sheet: str | None = None, mode: 
     return pd.concat(dfs, ignore_index=True, sort=False) if mode == "concat" else dfs[0]
 
 # -------------
-# Local files
+# Local files (fallback)
 # -------------
 
 def load_excel(uploaded_file, fallback_path=None, sheet=None) -> pd.DataFrame:
@@ -257,10 +298,12 @@ def load_excel(uploaded_file, fallback_path=None, sheet=None) -> pd.DataFrame:
 # -------------------------------
 # Configuração fixa — Google Drive
 # -------------------------------
-# Deixe USE_GDRIVE=True para ler SEM sidebar (pastas fixas do seu Drive compartilhado)
+# Leia SEM sidebar (pastas fixas do seu Drive compartilhado)
 USE_GDRIVE = True
 # Se houver mais de 1 arquivo por pasta: "concat" empilha todos; "latest" pega o mais recente
 GDRIVE_MODE = "concat"  # "concat" ou "latest"
+# Buscar também em subpastas (ex.: 2025/Julho)?
+GDRIVE_RECURSE = True
 
 # Informe os FOLDER IDs das pastas (use Secrets ou coloque diretamente aqui)
 FOLDER_IDS = {
@@ -270,15 +313,6 @@ FOLDER_IDS = {
     "receber":       st.secrets.get("GDRIVE_RECEBER_FOLDER_ID", ""),
     "repasses":      st.secrets.get("GDRIVE_REPASSES_FOLDER_ID", ""),
 }
-
-# OPCIONAL: se preferir hardcode, remova o st.secrets acima e cole os IDs entre aspas:
-# FOLDER_IDS = {
-#   "clientes": "1AbC...",
-#   "profissionais": "1Def...",
-#   "atendimentos": "1GhI...",
-#   "receber": "1JkL...",
-#   "repasses": "1MnO...",
-# }
 
 st.sidebar.markdown("**Fonte:** Google Drive (configuração fixa)")
 
@@ -301,7 +335,7 @@ with st.expander("🔧 Diagnóstico Google Drive"):
     if svc:
         for nome, fid in FOLDER_IDS.items():
             try:
-                files = drive_list_files(fid)
+                files = drive_list_files(fid, recurse=GDRIVE_RECURSE)
                 st.write(f"{nome}: {len(files)} arquivo(s) visível(is)")
                 if files:
                     st.write("Mais recente:", files[0].get("name"), files[0].get("modifiedTime"))
@@ -311,11 +345,11 @@ with st.expander("🔧 Diagnóstico Google Drive"):
 # Carregar dados conforme configuração fixa
 if USE_GDRIVE:
     mode = "concat" if GDRIVE_MODE.lower().startswith("concat") else "latest"
-    raw_clientes = read_drive_folder(FOLDER_IDS.get("clientes", ""),     preferred_sheet=None,               mode=mode)
-    raw_prof     = read_drive_folder(FOLDER_IDS.get("profissionais", ""), preferred_sheet=None,               mode=mode)
-    raw_atend    = read_drive_folder(FOLDER_IDS.get("atendimentos", ""),  preferred_sheet="Clientes",        mode=mode)
-    raw_receber  = read_drive_folder(FOLDER_IDS.get("receber", ""),       preferred_sheet="Dados Financeiros",mode=mode)
-    raw_repasses = read_drive_folder(FOLDER_IDS.get("repasses", ""),      preferred_sheet="Dados Financeiros",mode=mode)
+    raw_clientes = read_drive_folder(FOLDER_IDS.get("clientes", ""),     preferred_sheet=None,               mode=mode, recurse=GDRIVE_RECURSE)
+    raw_prof     = read_drive_folder(FOLDER_IDS.get("profissionais", ""), preferred_sheet=None,               mode=mode, recurse=GDRIVE_RECURSE)
+    raw_atend    = read_drive_folder(FOLDER_IDS.get("atendimentos", ""),  preferred_sheet="Clientes",        mode=mode, recurse=GDRIVE_RECURSE)
+    raw_receber  = read_drive_folder(FOLDER_IDS.get("receber", ""),       preferred_sheet="Dados Financeiros",mode=mode, recurse=GDRIVE_RECURSE)
+    raw_repasses = read_drive_folder(FOLDER_IDS.get("repasses", ""),      preferred_sheet="Dados Financeiros",mode=mode, recurse=GDRIVE_RECURSE)
 else:
     # Fallback local (arquivos no repositório)
     raw_clientes = load_excel(None, "Clientes.xlsx")
@@ -880,3 +914,5 @@ with aba[5]:
 
 st.markdown("---")
 st.caption("© Vavivê — Dashboard de indicadores. Este app aceita variações de nomes de colunas e tenta normalizar automaticamente. Para colunas ausentes, alguns gráficos podem não aparecer.")
+
+         
