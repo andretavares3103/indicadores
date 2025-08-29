@@ -3,10 +3,8 @@
 # Vavivê — Dashboard de Indicadores (Streamlit)
 # -------------------------------------------------------------
 # Fontes suportadas (selecionáveis na sidebar):
-#   1) Pasta local (GitHub repo)  ✅ (NOVA)
+#   1) Pasta local (GitHub repo)
 #   2) Upload manual (arquivos .xlsx/.xls/.csv)
-#   3) Drive fixo (IDs nas Secrets)           (opcional)
-#   4) Drive (IDs na sidebar)                 (opcional)
 # -------------------------------------------------------------
 
 import streamlit as st
@@ -17,7 +15,6 @@ from datetime import datetime, date
 from dateutil import parser
 import io
 from pathlib import Path
-import os
 
 # Plotly com fallback automático
 try:
@@ -26,15 +23,6 @@ try:
 except Exception:
     USE_PLOTLY = False
     st.warning("Plotly não está instalado. Usando gráficos nativos do Streamlit como fallback.")
-
-# Google Drive libs (opcionais)
-try:
-    from google.oauth2 import service_account
-    from googleapiclient.discovery import build
-    from googleapiclient.http import MediaIoBaseDownload
-    USE_GDRIVE_LIBS = True
-except Exception:
-    USE_GDRIVE_LIBS = False
 
 st.set_page_config(
     page_title="Vavivê | Indicadores",
@@ -83,168 +71,7 @@ def coalesce_inplace(df: pd.DataFrame, candidates: list[str], new: str) -> pd.Da
     return df
 
 # =============================================================
-# Google Drive — auth/listagem/leitura (compatível com Shared Drives)
-# (opcional; mantido por compatibilidade, você pode remover se quiser)
-# =============================================================
-
-def get_drive_service():
-    """Cria o client do Drive e valida o acesso incluindo Shared Drives."""
-    if not USE_GDRIVE_LIBS:
-        # Não exibe erro aqui para não poluir UI quando usando apenas fonte local
-        return None
-    try:
-        info = st.secrets.get("gdrive_service_account", None)
-        if info is None:
-            return None
-        if isinstance(info, str):
-            import json
-            info = json.loads(info)
-        creds = service_account.Credentials.from_service_account_info(
-            info,
-            scopes=["https://www.googleapis.com/auth/drive.readonly"],
-        )
-        service = build("drive", "v3", credentials=creds, cache_discovery=False)
-        # Validação rápida (considerando Shared Drives)
-        service.files().list(
-            pageSize=1,
-            fields="files(id)",
-            includeItemsFromAllDrives=True,
-            supportsAllDrives=True,
-            corpora="allDrives",
-        ).execute()
-        return service
-    except Exception:
-        return None
-
-@st.cache_data(ttl=600, show_spinner=False)
-def drive_list_files(folder_id: str, recurse: bool = False, max_depth: int = 10):
-    service = get_drive_service()
-    if service is None or not folder_id:
-        return []
-
-    def _list_children(fid):
-        q = f"'{fid}' in parents and trashed = false"
-        fields = "nextPageToken, files(id, name, mimeType, modifiedTime)"
-        files = []
-        page_token = None
-        while True:
-            resp = service.files().list(
-                q=q,
-                fields=fields,
-                pageToken=page_token,
-                includeItemsFromAllDrives=True,
-                supportsAllDrives=True,
-                corpora="allDrives",
-            ).execute()
-            files.extend(resp.get("files", []))
-            page_token = resp.get("nextPageToken")
-            if not page_token:
-                break
-        return files
-
-    results = []
-    if not recurse:
-        results = _list_children(folder_id)
-    else:
-        # BFS em subpastas
-        queue = [(folder_id, 0)]
-        while queue:
-            fid, depth = queue.pop(0)
-            try:
-                children = _list_children(fid)
-            except Exception:
-                children = []
-            for item in children:
-                if item.get("mimeType") == "application/vnd.google-apps.folder":
-                    if depth < max_depth:
-                        queue.append((item.get("id"), depth + 1))
-                else:
-                    results.append(item)
-
-    results.sort(key=lambda x: x.get("modifiedTime", ""), reverse=True)
-    return results
-
-def _drive_download_bytes(file_id: str, mime_type: str) -> bytes:
-    service = get_drive_service()
-    if service is None:
-        return b""
-    buf = io.BytesIO()
-    if mime_type == "application/vnd.google-apps.spreadsheet":
-        req = service.files().export_media(
-            fileId=file_id,
-            mimeType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            supportsAllDrives=True,
-        )
-    else:
-        req = service.files().get_media(
-            fileId=file_id,
-            supportsAllDrives=True,
-        )
-    downloader = MediaIoBaseDownload(buf, req)
-    done = False
-    while not done:
-        status, done = downloader.next_chunk()
-    return buf.getvalue()
-
-def read_drive_folder(folder_id: str, preferred_sheet: str | None = None, mode: str = "latest", recurse: bool = False) -> pd.DataFrame:
-    """Lê arquivos (Excel/Google Sheets/CSV) de uma pasta do Drive (opcionalmente recursiva).
-    mode: 'latest' pega o mais recente; 'concat' concatena todos.
-    """
-    files = drive_list_files(folder_id, recurse=recurse)
-    if not files:
-        return pd.DataFrame()
-
-    allowed = {
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
-        "application/vnd.ms-excel": "xls",
-        "text/csv": "csv",
-        "application/vnd.google-apps.spreadsheet": "gsheet",
-    }
-
-    dfs = []
-    take = files if mode == "concat" else [files[0]]
-    for f in take:
-        mt = f.get("mimeType")
-        if mt not in allowed:
-            continue
-        raw = _drive_download_bytes(f["id"], mt)
-        if not raw:
-            continue
-        bio = io.BytesIO(raw)
-        try:
-            if mt == "text/csv":
-                df = pd.read_csv(bio)
-            elif mt == "application/vnd.ms-excel":
-                try:
-                    xls = pd.ExcelFile(bio, engine="xlrd")
-                    first = xls.sheet_names[0] if preferred_sheet is None else preferred_sheet
-                    df = pd.read_excel(bio, sheet_name=first, engine="xlrd")
-                except Exception:
-                    first = None
-                    try:
-                        xls = pd.ExcelFile(bio)
-                        first = xls.sheet_names[0]
-                    except Exception:
-                        pass
-                    df = pd.read_excel(bio, sheet_name=(preferred_sheet or first))
-            else:
-                if preferred_sheet is None:
-                    xls = pd.ExcelFile(bio)
-                    df = pd.read_excel(xls, sheet_name=xls.sheet_names[0])
-                else:
-                    df = pd.read_excel(bio, sheet_name=preferred_sheet)
-            df["_source_file"] = f.get("name")
-            df["_modified"] = f.get("modifiedTime")
-            dfs.append(df)
-        except Exception as e:
-            st.warning(f"Falha ao ler {f.get('name')}: {e}")
-            continue
-    if not dfs:
-        return pd.DataFrame()
-    return pd.concat(dfs, ignore_index=True, sort=False) if mode == "concat" else dfs[0]
-
-# =============================================================
-# Leitura local (pasta no repositório GitHub) — NOVO
+# Leitura local (pasta no repositório GitHub)
 # =============================================================
 
 @st.cache_data(ttl=600, show_spinner=False)
@@ -341,8 +168,8 @@ def load_excel(uploaded_file, fallback_path=None, sheet=None) -> pd.DataFrame:
 st.sidebar.header("⚙️ Fonte dos dados")
 fonte = st.sidebar.radio(
     "Escolha a origem:",
-    ["Pasta local (GitHub repo)", "Upload manual", "Drive fixo (Secrets)", "Drive (IDs na sidebar)"],
-    index=0,  # padrão agora é pasta local
+    ["Pasta local (GitHub repo)", "Upload manual"],
+    index=0,  # padrão: pasta local
 )
 
 # Parâmetros comuns
@@ -353,29 +180,16 @@ LOCAL_MODE = "concat" if mode.startswith("concat") else "latest"
 LOCAL_RECURSE = st.sidebar.checkbox("Buscar em subpastas (recursivo)", value=True, key="local_recurse")
 
 DEFAULT_LOCAL_DIRS = {
-    "clientes":      st.secrets.get("LOCAL_CLIENTES_DIR", "./dados/clientes"),
-    "profissionais": st.secrets.get("LOCAL_PROFISSIONAIS_DIR", "./dados/profissionais"),
-    "atendimentos":  st.secrets.get("LOCAL_ATENDIMENTOS_DIR", "./dados/atendimentos"),
-    "receber":       st.secrets.get("LOCAL_RECEBER_DIR", "./dados/financeiro/receber"),
-    "repasses":      st.secrets.get("LOCAL_REPASSES_DIR", "./dados/financeiro/repasses"),
-}
-local_dirs = DEFAULT_LOCAL_DIRS.copy()
-
-# Google Drive (opcional)
-DEFAULT_LOCAL_DIRS = {
     "clientes":      "./Clientes",
     "profissionais": "./Profissionais",
     "atendimentos":  "./Atendimentos",
     "receber":       "./Contas Receber",
     "repasses":      "./Repasses",
 }
-
-GDRIVE_MODE = "concat" if mode.startswith("concat") else "latest"
-GDRIVE_RECURSE = st.sidebar.checkbox("Buscar em subpastas (Drive recursivo)", value=True, key="drive_recurse")
+local_dirs = DEFAULT_LOCAL_DIRS.copy()
 
 # Inputs conforme a fonte
 uploaded = {}
-folder_ids = DEFAULT_FOLDER_IDS.copy()
 
 if fonte == "Pasta local (GitHub repo)":
     st.sidebar.caption("Informe caminhos relativos à raiz do app (ou absolutos).")
@@ -396,17 +210,6 @@ elif fonte == "Upload manual":
     sheet_atd = st.sidebar.text_input("Aba de Atendimentos", "Clientes")
     sheet_fin = st.sidebar.text_input("Aba de Financeiro (Receber/Repasses)", "Dados Financeiros")
 
-elif fonte == "Drive (IDs na sidebar)":
-    st.sidebar.caption("Cole os IDs das pastas do Drive (ou deixe os que já vieram das Secrets).")
-    folder_ids["clientes"]      = st.sidebar.text_input("Pasta — Clientes",      DEFAULT_FOLDER_IDS["clientes"])
-    folder_ids["profissionais"] = st.sidebar.text_input("Pasta — Profissionais", DEFAULT_FOLDER_IDS["profissionais"])
-    folder_ids["atendimentos"]  = st.sidebar.text_input("Pasta — Atendimentos",  DEFAULT_FOLDER_IDS["atendimentos"])
-    folder_ids["receber"]       = st.sidebar.text_input("Pasta — Contas a Receber", DEFAULT_FOLDER_IDS["receber"])
-    folder_ids["repasses"]      = st.sidebar.text_input("Pasta — Repasses",      DEFAULT_FOLDER_IDS["repasses"])
-else:
-    # Drive fixo (Secrets)
-    pass
-
 # =============================================================
 # Diagnóstico — fonte ativa
 # =============================================================
@@ -419,32 +222,8 @@ with st.expander("🔧 Diagnóstico da fonte"):
             if ok:
                 encontrados = sum(1 for _ in p.rglob("*.xlsx")) + sum(1 for _ in p.rglob("*.xls")) + sum(1 for _ in p.rglob("*.csv"))
                 st.write(f"Arquivos suportados encontrados: {encontrados}")
-
-    elif fonte != "Upload manual":
-        # Diagnóstico Drive (apenas se libs presentes e secrets/IDs existirem)
-        st.write("Libs Google importadas?", USE_GDRIVE_LIBS)
-        has_secret = "gdrive_service_account" in st.secrets
-        st.write("Secret presente?", has_secret)
-        if has_secret:
-            try:
-                import json
-                _info = st.secrets.get("gdrive_service_account")
-                if isinstance(_info, str):
-                    _info = json.loads(_info)
-                st.write("client_email:", _info.get("client_email", "(vazio)"))
-            except Exception as e:
-                st.error(f"Erro lendo secret: {e}")
-        svc = get_drive_service()
-        st.write("Service account autenticada?", bool(svc))
-        if svc:
-            for nome, fid in folder_ids.items():
-                try:
-                    files = drive_list_files(fid, recurse=GDRIVE_RECURSE)
-                    st.write(f"{nome}: {len(files)} arquivo(s) visível(is)")
-                    if files:
-                        st.write("Mais recente:", files[0].get("name"), files[0].get("modifiedTime"))
-                except Exception as e:
-                    st.error(f"Falha ao listar {nome}: {e}")
+    else:
+        st.write("Upload manual selecionado — aguarde o envio dos arquivos.")
 
 # =============================================================
 # Carregar dados conforme a FONTE selecionada
@@ -462,14 +241,6 @@ elif fonte == "Pasta local (GitHub repo)":
     raw_atend    = read_local_folder(local_dirs.get("atendimentos", ""),  preferred_sheet="Clientes",          mode=LOCAL_MODE, recurse=LOCAL_RECURSE)
     raw_receber  = read_local_folder(local_dirs.get("receber", ""),       preferred_sheet="Dados Financeiros", mode=LOCAL_MODE, recurse=LOCAL_RECURSE)
     raw_repasses = read_local_folder(local_dirs.get("repasses", ""),      preferred_sheet="Dados Financeiros", mode=LOCAL_MODE, recurse=LOCAL_RECURSE)
-
-elif fonte in ("Drive fixo (Secrets)", "Drive (IDs na sidebar)"):
-    # Google Drive (mantém como está, caso você ainda queira manter a opção)
-    raw_clientes = read_drive_folder(folder_ids.get("clientes", ""),     preferred_sheet=None,                 mode=GDRIVE_MODE, recurse=GDRIVE_RECURSE)
-    raw_prof     = read_drive_folder(folder_ids.get("profissionais", ""), preferred_sheet=None,                 mode=GDRIVE_MODE, recurse=GDRIVE_RECURSE)
-    raw_atend    = read_drive_folder(folder_ids.get("atendimentos", ""),  preferred_sheet="Clientes",          mode=GDRIVE_MODE, recurse=GDRIVE_RECURSE)
-    raw_receber  = read_drive_folder(folder_ids.get("receber", ""),       preferred_sheet="Dados Financeiros", mode=GDRIVE_MODE, recurse=GDRIVE_RECURSE)
-    raw_repasses = read_drive_folder(folder_ids.get("repasses", ""),      preferred_sheet="Dados Financeiros", mode=GDRIVE_MODE)
 else:
     raw_clientes = raw_prof = raw_atend = raw_receber = raw_repasses = pd.DataFrame()
 
@@ -950,5 +721,4 @@ with tabs[5]:
                 })
 
 st.markdown("---")
-st.caption("© Vavivê — Dashboard de indicadores. Fonte padrão: Pasta local (GitHub). Você pode alternar na sidebar ou remover integrações não utilizadas.")
-
+st.caption("© Vavivê — Dashboard de indicadores. Fonte padrão: Pasta local (GitHub). Você pode alternar para Upload manual na sidebar.")
