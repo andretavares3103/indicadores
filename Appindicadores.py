@@ -2,9 +2,9 @@
 # -------------------------------------------------------------
 # Vavivê — Dashboard de Indicadores (Streamlit)
 # -------------------------------------------------------------
-# Fontes suportadas (selecionáveis na sidebar):
-#   1) Pasta local (GitHub repo)
-#   2) Upload manual (arquivos .xlsx/.xls/.csv)
+# Sem sidebar. Lê planilhas diretamente das pastas locais:
+#   ./Clientes, ./Profissionais, ./Atendimentos, ./Contas Receber, ./Repasses
+# Empilha (concatena) automaticamente se houver >1 arquivo por pasta.
 # -------------------------------------------------------------
 
 import streamlit as st
@@ -28,7 +28,6 @@ st.set_page_config(
     page_title="Vavivê | Indicadores",
     page_icon="🧹",
     layout="wide",
-    initial_sidebar_state="expanded",
 )
 
 # =============================================================
@@ -71,21 +70,19 @@ def coalesce_inplace(df: pd.DataFrame, candidates: list[str], new: str) -> pd.Da
     return df
 
 # =============================================================
-# Leitura local (pasta no repositório GitHub)
+# Leitura local (pasta do repositório) — SEMPRE CONCAT
 # =============================================================
 
 @st.cache_data(ttl=600, show_spinner=False)
 def read_local_folder(
     folder_path: str,
     preferred_sheet: str | None = None,
-    mode: str = "latest",
     recurse: bool = True,
     patterns: tuple[str, ...] = ("*.xlsx", "*.xls", "*.csv"),
 ) -> pd.DataFrame:
     """
-    Lê arquivos da pasta local (repositório).
-    mode: 'latest' pega só o mais recente; 'concat' concatena todos.
-    patterns: extensões suportadas.
+    Lê todos os arquivos suportados da pasta (e subpastas se recurse=True)
+    e **concatena** automaticamente.
     """
     if not folder_path:
         return pd.DataFrame()
@@ -95,7 +92,7 @@ def read_local_folder(
         st.warning(f"Pasta não encontrada: {base}")
         return pd.DataFrame()
 
-    # Busca arquivos (recursivo por padrão)
+    # Busca arquivos
     files = []
     if recurse:
         for pat in patterns:
@@ -103,18 +100,14 @@ def read_local_folder(
     else:
         for pat in patterns:
             files.extend(base.glob(pat))
-
     if not files:
         return pd.DataFrame()
 
-    # Ordena por data de modificação (mais recente primeiro)
+    # Ordena por mtime (só para informar _modified)
     files = sorted(files, key=lambda p: p.stat().st_mtime, reverse=True)
 
-    # Seleciona alvo(s)
-    take = files if mode == "concat" else [files[0]]
-
     dfs = []
-    for p in take:
+    for p in files:
         try:
             if p.suffix.lower() == ".csv":
                 df = pd.read_csv(p)
@@ -135,49 +128,11 @@ def read_local_folder(
 
     if not dfs:
         return pd.DataFrame()
-    return pd.concat(dfs, ignore_index=True, sort=False) if mode == "concat" else dfs[0]
+    return pd.concat(dfs, ignore_index=True, sort=False)
 
 # =============================================================
-# Local files (upload)
+# Caminhos (ajuste aqui se mudar a estrutura de pastas)
 # =============================================================
-
-def load_excel(uploaded_file, fallback_path=None, sheet=None) -> pd.DataFrame:
-    try:
-        if uploaded_file is not None:
-            if sheet is None:
-                xls = pd.ExcelFile(uploaded_file)
-                first = xls.sheet_names[0]
-                return pd.read_excel(uploaded_file, sheet_name=first)
-            else:
-                return pd.read_excel(uploaded_file, sheet_name=sheet)
-        if fallback_path is not None:
-            if sheet is None:
-                xls = pd.ExcelFile(fallback_path)
-                first = xls.sheet_names[0]
-                return pd.read_excel(fallback_path, sheet_name=first)
-            else:
-                return pd.read_excel(fallback_path, sheet_name=sheet)
-        return pd.DataFrame()
-    except Exception:
-        return pd.DataFrame()
-
-# =============================================================
-# Sidebar — seleção da fonte
-# =============================================================
-
-st.sidebar.header("⚙️ Fonte dos dados")
-fonte = st.sidebar.radio(
-    "Escolha a origem:",
-    ["Pasta local (GitHub repo)", "Upload manual"],
-    index=0,  # padrão: pasta local
-)
-
-# Parâmetros comuns
-mode = st.sidebar.selectbox("Modo de leitura", ["concat (todos os arquivos)", "latest (apenas o mais recente)"], index=0)
-
-# Pasta local (GitHub)
-LOCAL_MODE = "concat" if mode.startswith("concat") else "latest"
-LOCAL_RECURSE = st.sidebar.checkbox("Buscar em subpastas (recursivo)", value=True, key="local_recurse")
 
 DEFAULT_LOCAL_DIRS = {
     "clientes":      "./Clientes",
@@ -186,63 +141,35 @@ DEFAULT_LOCAL_DIRS = {
     "receber":       "./Contas Receber",
     "repasses":      "./Repasses",
 }
-local_dirs = DEFAULT_LOCAL_DIRS.copy()
 
-# Inputs conforme a fonte
-uploaded = {}
-
-if fonte == "Pasta local (GitHub repo)":
-    st.sidebar.caption("Informe caminhos relativos à raiz do app (ou absolutos).")
-    local_dirs["clientes"]      = st.sidebar.text_input("Pasta — Clientes",      local_dirs["clientes"])
-    local_dirs["profissionais"] = st.sidebar.text_input("Pasta — Profissionais", local_dirs["profissionais"])
-    local_dirs["atendimentos"]  = st.sidebar.text_input("Pasta — Atendimentos",  local_dirs["atendimentos"])
-    local_dirs["receber"]       = st.sidebar.text_input("Pasta — Contas a Receber", local_dirs["receber"])
-    local_dirs["repasses"]      = st.sidebar.text_input("Pasta — Repasses",      local_dirs["repasses"])
-
-elif fonte == "Upload manual":
-    st.sidebar.caption("Envie os arquivos .xlsx/.xls/.csv (abas padrão podem ser alteradas abaixo).")
-    uploaded["clientes"] = st.sidebar.file_uploader("Clientes.xlsx", type=["xlsx", "xls", "csv"], key="up_cli")
-    uploaded["prof"]     = st.sidebar.file_uploader("Profissionais.xlsx", type=["xlsx", "xls", "csv"], key="up_pro")
-    uploaded["atend"]    = st.sidebar.file_uploader("Atendimentos_*.xlsx", type=["xlsx", "xls", "csv"], key="up_atd")
-    uploaded["receber"]  = st.sidebar.file_uploader("Receber_*.xlsx", type=["xlsx", "xls", "csv"], key="up_rec")
-    uploaded["repasses"] = st.sidebar.file_uploader("Repasses_*.xlsx", type=["xlsx", "xls", "csv"], key="up_rep")
-    st.sidebar.markdown("**Abas (opcional)**")
-    sheet_atd = st.sidebar.text_input("Aba de Atendimentos", "Clientes")
-    sheet_fin = st.sidebar.text_input("Aba de Financeiro (Receber/Repasses)", "Dados Financeiros")
+local_dirs = {
+    "clientes":      st.secrets.get("LOCAL_CLIENTES_DIR", DEFAULT_LOCAL_DIRS["clientes"]),
+    "profissionais": st.secrets.get("LOCAL_PROFISSIONAIS_DIR", DEFAULT_LOCAL_DIRS["profissionais"]),
+    "atendimentos":  st.secrets.get("LOCAL_ATENDIMENTOS_DIR", DEFAULT_LOCAL_DIRS["atendimentos"]),
+    "receber":       st.secrets.get("LOCAL_RECEBER_DIR", DEFAULT_LOCAL_DIRS["receber"]),
+    "repasses":      st.secrets.get("LOCAL_REPASSES_DIR", DEFAULT_LOCAL_DIRS["repasses"]),
+}
 
 # =============================================================
-# Diagnóstico — fonte ativa
+# Diagnóstico (opcional)
 # =============================================================
-with st.expander("🔧 Diagnóstico da fonte"):
-    if fonte == "Pasta local (GitHub repo)":
-        for nome, pth in local_dirs.items():
-            p = Path(pth).expanduser().resolve()
-            ok = p.exists() and p.is_dir()
-            st.write(f"{nome}: caminho='{p}', existe? {ok}")
-            if ok:
-                encontrados = sum(1 for _ in p.rglob("*.xlsx")) + sum(1 for _ in p.rglob("*.xls")) + sum(1 for _ in p.rglob("*.csv"))
-                st.write(f"Arquivos suportados encontrados: {encontrados}")
-    else:
-        st.write("Upload manual selecionado — aguarde o envio dos arquivos.")
+with st.expander("🔧 Diagnóstico das pastas"):
+    for nome, pth in local_dirs.items():
+        p = Path(pth).expanduser().resolve()
+        ok = p.exists() and p.is_dir()
+        st.write(f"{nome}: caminho='{p}', existe? {ok}")
+        if ok:
+            encontrados = sum(1 for _ in p.rglob("*.xlsx")) + sum(1 for _ in p.rglob("*.xls")) + sum(1 for _ in p.rglob("*.csv"))
+            st.write(f"Arquivos suportados encontrados: {encontrados}")
 
 # =============================================================
-# Carregar dados conforme a FONTE selecionada
+# Carregar dados (concat automático) a partir das pastas
 # =============================================================
-if fonte == "Upload manual":
-    raw_clientes = load_excel(uploaded.get("clientes"))
-    raw_prof     = load_excel(uploaded.get("prof"))
-    raw_atend    = load_excel(uploaded.get("atend"),    sheet=(sheet_atd or None))
-    raw_receber  = load_excel(uploaded.get("receber"),  sheet=(sheet_fin or None))
-    raw_repasses = load_excel(uploaded.get("repasses"), sheet=(sheet_fin or None))
-
-elif fonte == "Pasta local (GitHub repo)":
-    raw_clientes = read_local_folder(local_dirs.get("clientes", ""),     preferred_sheet=None,                 mode=LOCAL_MODE, recurse=LOCAL_RECURSE)
-    raw_prof     = read_local_folder(local_dirs.get("profissionais", ""), preferred_sheet=None,                 mode=LOCAL_MODE, recurse=LOCAL_RECURSE)
-    raw_atend    = read_local_folder(local_dirs.get("atendimentos", ""),  preferred_sheet="Clientes",          mode=LOCAL_MODE, recurse=LOCAL_RECURSE)
-    raw_receber  = read_local_folder(local_dirs.get("receber", ""),       preferred_sheet="Dados Financeiros", mode=LOCAL_MODE, recurse=LOCAL_RECURSE)
-    raw_repasses = read_local_folder(local_dirs.get("repasses", ""),      preferred_sheet="Dados Financeiros", mode=LOCAL_MODE, recurse=LOCAL_RECURSE)
-else:
-    raw_clientes = raw_prof = raw_atend = raw_receber = raw_repasses = pd.DataFrame()
+raw_clientes = read_local_folder(local_dirs["clientes"],     preferred_sheet=None,                recurse=True)
+raw_prof     = read_local_folder(local_dirs["profissionais"], preferred_sheet=None,                recurse=True)
+raw_atend    = read_local_folder(local_dirs["atendimentos"],  preferred_sheet="Clientes",         recurse=True)
+raw_receber  = read_local_folder(local_dirs["receber"],       preferred_sheet="Dados Financeiros",recurse=True)
+raw_repasses = read_local_folder(local_dirs["repasses"],      preferred_sheet="Dados Financeiros",recurse=True)
 
 # =============================================================
 # Normalização das bases
@@ -383,7 +310,7 @@ if not rec.empty or not rep.empty:
     fin = fin.loc[:, ~fin.columns.duplicated()]
 
 # =============================================================
-# Filtros globais por data
+# Filtro de período (na página, sem sidebar)
 # =============================================================
 all_dates = []
 for _df, cols in [
@@ -402,10 +329,8 @@ if all_dates:
 else:
     today = date.today(); dmin = date(today.year, 1, 1); dmax = today
 
-with st.sidebar:
-    st.markdown("---")
-    st.markdown("## 🗓️ Período")
-    sel_ini, sel_fim = st.date_input("Selecione o intervalo", value=(dmin, dmax))
+st.markdown("## 🗓️ Período")
+sel_ini, sel_fim = st.date_input("Selecione o intervalo", value=(dmin, dmax))
 
 # Aplicar filtros de data
 if not atd.empty and "data_atendimento" in atd.columns:
@@ -488,7 +413,7 @@ if not atd_base.empty or not fin_base.empty:
 st.title("Indicadores — Vavivê")
 
 if all([df.empty for df in [cli, pro, atd, rec, rep]]):
-    st.info("Envie/aponte as bases para visualizar os indicadores.")
+    st.info("Nenhuma base encontrada nas pastas configuradas.")
 
 tabs = st.tabs([
     "📋 Visão Geral",
@@ -721,4 +646,4 @@ with tabs[5]:
                 })
 
 st.markdown("---")
-st.caption("© Vavivê — Dashboard de indicadores. Fonte padrão: Pasta local (GitHub). Você pode alternar para Upload manual na sidebar.")
+st.caption("© Vavivê — Dashboard de indicadores. Sem sidebar. Pastas locais lidas e empilhadas automaticamente.")
