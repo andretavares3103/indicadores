@@ -13,7 +13,6 @@ import numpy as np
 import unicodedata
 from datetime import datetime, date
 from dateutil import parser
-import io
 from pathlib import Path
 
 # Plotly com fallback automático
@@ -81,8 +80,9 @@ def read_local_folder(
     patterns: tuple[str, ...] = ("*.xlsx", "*.xls", "*.csv"),
 ) -> pd.DataFrame:
     """
-    Lê todos os arquivos suportados da pasta (e subpastas se recurse=True)
-    e **concatena** automaticamente.
+    Lê todos os arquivos suportados da pasta (e subpastas) e concatena.
+    - Excel: tenta uma aba alvo (preferred_sheet) e sinônimos antes de cair na 1ª.
+    - CSV: detecta separador ';' ou ',' automaticamente.
     """
     if not folder_path:
         return pd.DataFrame()
@@ -92,8 +92,8 @@ def read_local_folder(
         st.warning(f"Pasta não encontrada: {base}")
         return pd.DataFrame()
 
-    # Busca arquivos
-    files = []
+    # Coleta arquivos
+    files: list[Path] = []
     if recurse:
         for pat in patterns:
             files.extend(base.rglob(pat))
@@ -103,32 +103,62 @@ def read_local_folder(
     if not files:
         return pd.DataFrame()
 
-    # Ordena por mtime (só para informar _modified)
+    # Ordena por mtime (apenas para preencher _modified)
     files = sorted(files, key=lambda p: p.stat().st_mtime, reverse=True)
+
+    # Candidatos de nomes de abas quando não há preferred_sheet
+    sheet_candidates = [
+        preferred_sheet or "",
+        "Profissionais", "Profissional", "Prestadores", "Cadastro", "Dados"
+    ]
+    sheet_candidates = [c for c in sheet_candidates if c]
+
+    def _guess_sep(sample: str) -> str:
+        return ";" if sample.count(";") > sample.count(",") else ","
 
     dfs = []
     for p in files:
         try:
-            if p.suffix.lower() == ".csv":
-                df = pd.read_csv(p)
-            elif p.suffix.lower() in (".xls", ".xlsx"):
-                if preferred_sheet is None:
-                    xls = pd.ExcelFile(p)
-                    df = pd.read_excel(xls, sheet_name=xls.sheet_names[0])
+            suf = p.suffix.lower()
+            if suf == ".csv":
+                # detectar separador
+                with open(p, "r", encoding="utf-8", errors="ignore") as f:
+                    sample = f.read(8192)
+                sep = _guess_sep(sample)
+                df = pd.read_csv(p, sep=sep)
+
+            elif suf in (".xls", ".xlsx"):
+                xls = pd.ExcelFile(p)
+                sheet_to_use = None
+
+                # 1) preferred_sheet explícita
+                if preferred_sheet and preferred_sheet in xls.sheet_names:
+                    sheet_to_use = preferred_sheet
                 else:
-                    df = pd.read_excel(p, sheet_name=preferred_sheet)
+                    # 2) procurar nomes parecidos, normalizando
+                    slug_targets = {_slug(nm) for nm in sheet_candidates}
+                    for nm in xls.sheet_names:
+                        if _slug(nm) in slug_targets:
+                            sheet_to_use = nm
+                            break
+                    # 3) fallback: primeira aba
+                    if sheet_to_use is None:
+                        sheet_to_use = xls.sheet_names[0]
+
+                df = pd.read_excel(xls, sheet_name=sheet_to_use)
+
             else:
                 continue
+
             df["_source_file"] = p.name
             df["_modified"] = pd.to_datetime(p.stat().st_mtime, unit="s")
             dfs.append(df)
+
         except Exception as e:
             st.warning(f"Falha ao ler {p.name}: {e}")
             continue
 
-    if not dfs:
-        return pd.DataFrame()
-    return pd.concat(dfs, ignore_index=True, sort=False)
+    return pd.concat(dfs, ignore_index=True, sort=False) if dfs else pd.DataFrame()
 
 # =============================================================
 # Caminhos (ajuste aqui se mudar a estrutura de pastas)
@@ -159,14 +189,18 @@ with st.expander("🔧 Diagnóstico das pastas"):
         ok = p.exists() and p.is_dir()
         st.write(f"{nome}: caminho='{p}', existe? {ok}")
         if ok:
-            encontrados = sum(1 for _ in p.rglob("*.xlsx")) + sum(1 for _ in p.rglob("*.xls")) + sum(1 for _ in p.rglob("*.csv"))
+            encontrados = (
+                sum(1 for _ in p.rglob("*.xlsx")) +
+                sum(1 for _ in p.rglob("*.xls")) +
+                sum(1 for _ in p.rglob("*.csv"))
+            )
             st.write(f"Arquivos suportados encontrados: {encontrados}")
 
 # =============================================================
 # Carregar dados (concat automático) a partir das pastas
 # =============================================================
 raw_clientes = read_local_folder(local_dirs["clientes"],     preferred_sheet=None,                recurse=True)
-raw_prof     = read_local_folder(local_dirs["profissionais"], preferred_sheet=None,                recurse=True)
+raw_prof     = read_local_folder(local_dirs["profissionais"], preferred_sheet="Profissionais",    recurse=True)  # 👈 ajuste aqui
 raw_atend    = read_local_folder(local_dirs["atendimentos"],  preferred_sheet="Clientes",         recurse=True)
 raw_receber  = read_local_folder(local_dirs["receber"],       preferred_sheet="Dados Financeiros",recurse=True)
 raw_repasses = read_local_folder(local_dirs["repasses"],      preferred_sheet="Dados Financeiros",recurse=True)
