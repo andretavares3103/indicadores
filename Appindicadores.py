@@ -362,13 +362,14 @@ DEFAULT_LOCAL_DIRS = {
 local_dirs = DEFAULT_LOCAL_DIRS.copy()
 
 # Google Drive (opcional)
-DEFAULT_FOLDER_IDS = {
-    "clientes":      st.secrets.get("GDRIVE_CLIENTES_FOLDER_ID", ""),
-    "profissionais": st.secrets.get("GDRIVE_PROFISSIONAIS_FOLDER_ID", ""),
-    "atendimentos":  st.secrets.get("GDRIVE_ATENDIMENTOS_FOLDER_ID", ""),
-    "receber":       st.secrets.get("GDRIVE_RECEBER_FOLDER_ID", ""),
-    "repasses":      st.secrets.get("GDRIVE_REPASSES_FOLDER_ID", ""),
+DEFAULT_LOCAL_DIRS = {
+    "clientes":      "./Clientes",
+    "profissionais": "./Profissionais",
+    "atendimentos":  "./Atendimentos",
+    "receber":       "./Contas Receber",
+    "repasses":      "./Repasses",
 }
+
 GDRIVE_MODE = "concat" if mode.startswith("concat") else "latest"
 GDRIVE_RECURSE = st.sidebar.checkbox("Buscar em subpastas (Drive recursivo)", value=True, key="drive_recurse")
 
@@ -950,3 +951,4 @@ with tabs[5]:
 
 st.markdown("---")
 st.caption("© Vavivê — Dashboard de indicadores. Fonte padrão: Pasta local (GitHub). Você pode alternar na sidebar ou remover integrações não utilizadas.")
+
