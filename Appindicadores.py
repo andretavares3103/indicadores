@@ -2,9 +2,10 @@
 # -------------------------------------------------------------
 # Vavivê — Dashboard de Indicadores (Streamlit)
 # -------------------------------------------------------------
-# Sem sidebar. Lê planilhas diretamente das pastas locais:
+# Sem sidebar. Lê planilhas de pastas locais:
 #   ./Clientes, ./Profissionais, ./Atendimentos, ./Contas Receber, ./Repasses
-# Empilha (concatena) automaticamente todos os arquivos por pasta.
+# Empilha (concat) automaticamente todos os arquivos por pasta.
+# TODAS as abas e KPIs são sensíveis ao filtro de período.
 # -------------------------------------------------------------
 
 import streamlit as st
@@ -235,6 +236,7 @@ if not cli.empty:
         "endereco_1_rua": "rua",
         "endereco_1_cep": "cep",
         "origem": "origem_cliente",
+        "nome": "cliente_nome",
     }, inplace=True)
 
 if not pro.empty:
@@ -360,6 +362,7 @@ if not rec.empty or not rep.empty:
 # =============================================================
 # Filtro de período (na página, sem sidebar)
 # =============================================================
+# Coleta datas globais para default do widget
 all_dates = []
 for _df, cols in [
     (atd, ["data_atendimento"]),
@@ -379,10 +382,12 @@ else:
 
 st.markdown("## 🗓️ Período")
 sel_ini, sel_fim = st.date_input("Selecione o intervalo", value=(dmin, dmax))
+dt_ini = pd.to_datetime(sel_ini)
+dt_fim = pd.to_datetime(sel_fim)
 
-# Aplicar filtros de data
+# ------- aplica filtro nas tabelas "de evento" -------
 if not atd.empty and "data_atendimento" in atd.columns:
-    atd_f = atd[(atd["data_atendimento"] >= pd.to_datetime(sel_ini)) & (atd["data_atendimento"] <= pd.to_datetime(sel_fim))]
+    atd_f = atd[(atd["data_atendimento"] >= dt_ini) & (atd["data_atendimento"] <= dt_fim)].copy()
 else:
     atd_f = atd.copy()
 
@@ -392,7 +397,7 @@ if not rec.empty:
         dt_rec["_data_fin"] = dt_rec["data_pagamento"].fillna(dt_rec.get("data_vencimento"))
     else:
         dt_rec["_data_fin"] = dt_rec.get("data_vencimento")
-    rec_f = dt_rec[(pd.to_datetime(dt_rec["_data_fin"], errors="coerce") >= pd.to_datetime(sel_ini)) & (pd.to_datetime(dt_rec["_data_fin"], errors="coerce") <= pd.to_datetime(sel_fim))]
+    rec_f = dt_rec[(pd.to_datetime(dt_rec["_data_fin"], errors="coerce") >= dt_ini) & (pd.to_datetime(dt_rec["_data_fin"], errors="coerce") <= dt_fim)].copy()
 else:
     rec_f = rec.copy()
 
@@ -400,7 +405,7 @@ if not rep.empty:
     dt_rep = rep.copy()
     base_col = "data_pagamento_repasse" if "data_pagamento_repasse" in dt_rep.columns else "data_vencimento_repasse"
     if base_col in dt_rep.columns:
-        rep_f = dt_rep[(pd.to_datetime(dt_rep[base_col], errors="coerce") >= pd.to_datetime(sel_ini)) & (pd.to_datetime(dt_rep[base_col], errors="coerce") <= pd.to_datetime(sel_fim))]
+        rep_f = dt_rep[(pd.to_datetime(dt_rep[base_col], errors="coerce") >= dt_ini) & (pd.to_datetime(dt_rep[base_col], errors="coerce") <= dt_fim)].copy()
     else:
         rep_f = rep.copy()
 else:
@@ -413,10 +418,66 @@ if not fin_f.empty:
         fin_f["_data"] = fin_f["data_pagamento"].fillna(fin_f.get("data_vencimento"))
     if "data_pagamento_repasse" in fin_f.columns:
         fin_f["_data"] = fin_f["_data"].fillna(fin_f["data_pagamento_repasse"]).fillna(fin_f.get("data_vencimento_repasse"))
-    fin_f = fin_f[(pd.to_datetime(fin_f["_data"], errors="coerce") >= pd.to_datetime(sel_ini)) & (pd.to_datetime(fin_f["_data"], errors="coerce") <= pd.to_datetime(sel_fim))]
+    fin_f = fin_f[(pd.to_datetime(fin_f["_data"], errors="coerce") >= dt_ini) & (pd.to_datetime(fin_f["_data"], errors="coerce") <= dt_fim)].copy()
+
+# ------- aplica filtro nas tabelas "de cadastro" (clientes/profissionais) -------
+def _filter_by_date_or_activity(df: pd.DataFrame, date_candidates: list[str], activity_df: pd.DataFrame, pairs: list[tuple[str, str]]) -> pd.DataFrame:
+    """
+    1) Se houver alguma coluna de data válida no df, filtra por dt_ini..dt_fim.
+    2) Caso não haja data, filtra por 'atividade': mantém apenas registros cujo identificador
+       aparece no activity_df (ex.: clientes que tiveram atendimento no período).
+    pairs: lista de pares (col_df, col_activity) para match.
+    """
+    if df.empty:
+        return df.copy()
+
+    # 1) tentar por data interna
+    for col in date_candidates:
+        if col in df.columns:
+            dates = pd.to_datetime(df[col].apply(try_parse_date), errors="coerce")
+            if dates.notna().any():
+                dff = df.copy()
+                dff["_date"] = dates
+                return dff[(dff["_date"] >= dt_ini) & (dff["_date"] <= dt_fim)].copy()
+
+    # 2) fallback por atividade
+    if activity_df is not None and not activity_df.empty:
+        for col_df, col_act in pairs:
+            if (col_df in df.columns) and (col_act in activity_df.columns):
+                keys = set(activity_df[col_act].dropna().astype(str).str.strip())
+                dff = df.copy()
+                return dff[dff[col_df].astype(str).str.strip().isin(keys)].copy()
+
+    # se nada der, retorna vazio para honrar "sensível ao período"
+    return df.iloc[0:0].copy()
+
+# Clientes sensíveis ao período
+cli_date_candidates = ["data_cadastro", "created_at", "criado_em", "cadastro_data", "data", "data_1"]
+# tentar parear por id/cpf/email/nome com atendimentos
+cli_pairs = [
+    ("cliente_id", "cliente_id"),
+    ("cliente_cpf", "cliente_cpf"),
+    ("cliente_email", "cliente_email"),
+    ("cliente_nome", "cliente_nome"),
+    ("nome", "cliente_nome"),
+]
+cli_f = _filter_by_date_or_activity(cli, cli_date_candidates, atd_f, cli_pairs)
+
+# Profissionais sensíveis ao período
+pro_date_candidates = ["data_cadastro", "created_at", "criado_em", "cadastro_data", "data", "data_1"]
+# parear preferencialmente com financeiro (tem prof_cpf e profissional_nome), senão atend
+pro_pairs_fin = [
+    ("prof_cpf", "prof_cpf"),
+    ("prof_nome", "profissional_nome"),
+]
+pro_pairs_atd = [
+    ("prof_cpf", "prof_cpf"),
+    ("prof_nome", "profissional_nome"),
+]
+pro_f = _filter_by_date_or_activity(pro, pro_date_candidates, fin_f if not fin_f.empty else atd_f, pro_pairs_fin if not fin_f.empty else pro_pairs_atd)
 
 # =============================================================
-# View auxiliar — OS unificada (Atend + Financeiro + Prof)
+# View auxiliar — OS unificada (Atend + Financeiro + Prof) [filtrada]
 # =============================================================
 atd_base = pd.DataFrame()
 if not atd_f.empty:
@@ -430,11 +491,11 @@ if not fin_f.empty:
                       if c in fin_f.columns]].copy()
 
 pro_base = pd.DataFrame()
-if not pro.empty:
-    if "prof_cpf" in pro.columns:
-        pro_base = pro[[c for c in ["prof_cpf", "prof_nome", "prof_rua", "prof_bairro", "prof_cidade", "prof_cep"] if c in pro.columns]].drop_duplicates(subset=["prof_cpf"])
+if not pro_f.empty:
+    if "prof_cpf" in pro_f.columns:
+        pro_base = pro_f[[c for c in ["prof_cpf", "prof_nome", "prof_rua", "prof_bairro", "prof_cidade", "prof_cep"] if c in pro_f.columns]].drop_duplicates(subset=["prof_cpf"])
     else:
-        pro_base = pro[[c for c in ["prof_nome", "prof_rua", "prof_bairro", "prof_cidade", "prof_cep"] if c in pro.columns]].drop_duplicates()
+        pro_base = pro_f[[c for c in ["prof_nome", "prof_rua", "prof_bairro", "prof_cidade", "prof_cep"] if c in pro_f.columns]].drop_duplicates()
 
 os_view = pd.DataFrame()
 if not atd_base.empty or not fin_base.empty:
@@ -456,12 +517,12 @@ if not atd_base.empty or not fin_base.empty:
     os_view = os_view.loc[:, ~os_view.columns.duplicated()]
 
 # =============================================================
-# UI — TABS
+# UI — TABS (TODO período-sensível em todas)
 # =============================================================
 st.title("Indicadores — Vavivê")
 
-if all([df.empty for df in [cli, pro, atd, rec, rep]]):
-    st.info("Nenhuma base encontrada nas pastas configuradas.")
+if all([df.empty for df in [cli_f, pro_f, atd_f, rec_f, rep_f]]):
+    st.info("Nenhuma base com dados no período selecionado.")
 
 tabs = st.tabs([
     "📋 Visão Geral",
@@ -472,15 +533,14 @@ tabs = st.tabs([
     "🔎 OS — Detalhe",
 ])
 
-# Visão Geral
+# Visão Geral (PERÍODO)
 with tabs[0]:
     st.subheader("KPIs do Período")
 
-    # Normaliza status para contagens robustas (ignora acento/maiúsculas)
     status_norm = atd_f.get("status_servico").map(_norm_text) if ("status_servico" in atd_f.columns) else pd.Series(dtype=str)
 
-    total_clientes = int(cli.shape[0]) if not cli.empty else 0
-    total_prof = int(pro.shape[0]) if not pro.empty else 0
+    total_clientes = int(cli_f.shape[0]) if not cli_f.empty else 0
+    total_prof = int(pro_f.shape[0]) if not pro_f.empty else 0
     concl = int((status_norm == "concluido").sum()) if not atd_f.empty else 0
     agend = int((status_norm == "agendado").sum()) if not atd_f.empty else 0
     canc  = int((status_norm == "cancelado").sum()) if not atd_f.empty else 0
@@ -490,30 +550,30 @@ with tabs[0]:
     mc_total = float(fin_f.get("mc").sum()) if not fin_f.empty and "mc" in fin_f.columns else (receita - repasses)
 
     c1, c2, c3, c4, c5, c6 = st.columns(6)
-    c1.metric("Clientes (cadastro)", f"{total_clientes:,}".replace(",", "."))
-    c2.metric("Profissionais (cadastro)", f"{total_prof:,}".replace(",", "."))
-    c3.metric("Atendimentos Concluídos", f"{concl:,}".replace(",", "."))
+    c1.metric("Clientes (no período)", f"{total_clientes:,}".replace(",", "."))
+    c2.metric("Profissionais (no período)", f"{total_prof:,}".replace(",", "."))
+    c3.metric("Concluídos", f"{concl:,}".replace(",", "."))
     c4.metric("Agendados", f"{agend:,}".replace(",", "."))
     c5.metric("Cancelados", f"{canc:,}".replace(",", "."))
-    c6.metric("Margem de Contribuição", f"R$ {mc_total:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+    c6.metric("MC (no período)", f"R$ {mc_total:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
 
     st.markdown("---")
-    st.caption("MC = Receita (Contas a Receber) − Repasses às Profissionais.")
+    st.caption("MC = Receita (Contas a Receber) − Repasses às Profissionais — apenas dentro do período.")
 
-# Clientes & Regiões
+# Clientes & Regiões (PERÍODO)
 with tabs[1]:
-    st.subheader("Clientes")
-    if cli.empty:
-        st.warning("Base de Clientes não carregada.")
+    st.subheader("Clientes (no período)")
+    if cli_f.empty:
+        st.warning("Nenhum cliente no período (considerando data de cadastro ou atividade em atendimentos).")
     else:
-        col_origem = next((c for c in ["origem_cliente", "origem"] if c in cli.columns), None)
+        col_origem = next((c for c in ["origem_cliente", "origem"] if c in cli_f.columns), None)
         if col_origem:
             origem_counts = (
-                cli[col_origem].fillna("(não informado)").replace({"": "(não informado)"}).value_counts().reset_index()
+                cli_f[col_origem].fillna("(não informado)").replace({"": "(não informado)"}).value_counts().reset_index()
             )
             origem_counts.columns = ["origem", "quantidade"]
             if USE_PLOTLY:
-                fig = px.bar(origem_counts, x="origem", y="quantidade", title="Origem dos Clientes", text_auto=True)
+                fig = px.bar(origem_counts, x="origem", y="quantidade", title="Origem dos Clientes (período)", text_auto=True)
                 st.plotly_chart(fig, use_container_width=True)
             else:
                 st.bar_chart(origem_counts.set_index("origem")["quantidade"])
@@ -521,62 +581,62 @@ with tabs[1]:
             st.info("Coluna de origem do cliente não encontrada.")
 
         st.markdown("---")
-        st.subheader("Regiões")
-        col_bairro = next((cc for c in ["bairro", "endereco_bairro", "endereco-1-bairro"] if (cc := _slug(c)) in cli.columns), None)
-        col_cidade = "cidade" if "cidade" in cli.columns else None
+        st.subheader("Regiões (no período)")
+        col_bairro = next((cc for c in ["bairro", "endereco_bairro", "endereco-1-bairro"] if (cc := _slug(c)) in cli_f.columns), None)
+        col_cidade = "cidade" if "cidade" in cli_f.columns else None
         cols = st.columns(2)
         if col_bairro:
-            bairro_counts = cli[col_bairro].fillna("(sem bairro)").astype(str).replace({"": "(sem bairro)"}).value_counts().reset_index()
+            bairro_counts = cli_f[col_bairro].fillna("(sem bairro)").astype(str).replace({"": "(sem bairro)"}).value_counts().reset_index()
             bairro_counts.columns = ["bairro", "clientes"]
             if USE_PLOTLY:
-                fig_b = px.bar(bairro_counts.head(20), x="bairro", y="clientes", title="Top Bairros por Clientes", text_auto=True)
+                fig_b = px.bar(bairro_counts.head(20), x="bairro", y="clientes", title="Top Bairros por Clientes (período)", text_auto=True)
                 cols[0].plotly_chart(fig_b, use_container_width=True)
             else:
                 cols[0].bar_chart(bairro_counts.set_index("bairro")["clientes"])
         else:
             cols[0].info("Coluna de bairro não encontrada.")
         if col_cidade:
-            cidade_counts = cli[col_cidade].fillna("(sem cidade)").astype(str).replace({"": "(sem cidade)"}).value_counts().reset_index()
+            cidade_counts = cli_f[col_cidade].fillna("(sem cidade)").astype(str).replace({"": "(sem cidade)"}).value_counts().reset_index()
             cidade_counts.columns = ["cidade", "clientes"]
             if USE_PLOTLY:
-                fig_c = px.bar(cidade_counts, x="cidade", y="clientes", title="Clientes por Cidade", text_auto=True)
+                fig_c = px.bar(cidade_counts, x="cidade", y="clientes", title="Clientes por Cidade (período)", text_auto=True)
                 cols[1].plotly_chart(fig_c, use_container_width=True)
             else:
                 cols[1].bar_chart(cidade_counts.set_index("cidade")["clientes"])
         else:
             cols[1].info("Coluna de cidade não encontrada.")
 
-# Profissionais
+# Profissionais (PERÍODO)
 with tabs[2]:
-    st.subheader("Profissionais")
-    if pro.empty and atd_f.empty:
-        st.warning("Bases de Profissionais e Atendimentos não carregadas.")
+    st.subheader("Profissionais (no período)")
+    if pro_f.empty and atd_f.empty:
+        st.warning("Sem profissionais no período.")
     else:
         cols = st.columns(3)
-        total_prof = int(pro.shape[0]) if not pro.empty else 0
-        cols[0].metric("Total de Profissionais (cadastro)", f"{total_prof:,}".replace(",", "."))
+        total_prof = int(pro_f.shape[0]) if not pro_f.empty else 0
+        cols[0].metric("Total de Profissionais", f"{total_prof:,}".replace(",", "."))
         if not atd_f.empty and "status_servico" in atd_f.columns:
             status_norm2 = atd_f["status_servico"].map(_norm_text)
             concluidos = (status_norm2 == "concluido").sum()
             cols[1].metric("Atendimentos Concluídos (período)", f"{int(concluidos):,}".replace(",", "."))
         else:
             cols[1].metric("Atendimentos Concluídos (período)", "0")
-        if not pro.empty and {"att_feitos", "att_recusados"} <= set(pro.columns):
-            feitos = pro["att_feitos"].fillna(0).astype(float).sum()
-            recusados = pro["att_recusados"].fillna(0).astype(float).sum()
+        if not pro_f.empty and {"att_feitos", "att_recusados"} <= set(pro_f.columns):
+            feitos = pro_f["att_feitos"].fillna(0).astype(float).sum()
+            recusados = pro_f["att_recusados"].fillna(0).astype(float).sum()
             taxa = (recusados / (feitos + recusados) * 100) if (feitos + recusados) > 0 else 0
-            cols[2].metric("Taxa de Recusa (cadastro)", f"{taxa:.1f}%")
+            cols[2].metric("Taxa de Recusa (cadastro/ativos no período)", f"{taxa:.1f}%")
         else:
-            cols[2].metric("Taxa de Recusa (cadastro)", "—")
+            cols[2].metric("Taxa de Recusa (cadastro/ativos no período)", "—")
 
         st.markdown("---")
-        st.caption("Quando a OS trouxer o ID/CPF da profissional, o ranking detalhado aparecerá aqui.")
+        st.caption("A lista considera profissionais com data de cadastro no período OU que atuaram em atendimentos/financeiro no período.")
 
-# Atendimentos
+# Atendimentos (PERÍODO)
 with tabs[3]:
-    st.subheader("Atendimentos")
+    st.subheader("Atendimentos (no período)")
     if atd_f.empty:
-        st.warning("Base de Atendimentos não carregada ou sem dados no período.")
+        st.warning("Sem atendimentos no período.")
     else:
         if {"data_atendimento", "status_servico"} <= set(atd_f.columns):
             tmp = atd_f.copy()
@@ -584,7 +644,7 @@ with tabs[3]:
             tmp["status_norm"] = tmp["status_servico"].map(_norm_text)
             serie = tmp.groupby(["dia", "status_norm"]).size().reset_index(name="qtd")
             if USE_PLOTLY:
-                fig = px.line(serie, x="dia", y="qtd", color="status_norm", markers=True, title="Atendimentos por Dia (por status)")
+                fig = px.line(serie, x="dia", y="qtd", color="status_norm", markers=True, title="Atendimentos por Dia (período)")
                 st.plotly_chart(fig, use_container_width=True)
             else:
                 pivot = serie.pivot(index="dia", columns="status_norm", values="qtd").fillna(0).sort_index()
@@ -604,30 +664,30 @@ with tabs[3]:
         st.markdown("---")
         st.dataframe(atd_f.head(200))
 
-# Financeiro
+# Financeiro (PERÍODO)
 with tabs[4]:
-    st.subheader("Receita, Repasses e Margem de Contribuição")
+    st.subheader("Receita, Repasses e MC (no período)")
     if fin_f.empty and rec_f.empty and rep_f.empty:
-        st.warning("Bases financeiras não carregadas.")
+        st.warning("Sem dados financeiros no período.")
     else:
         receita = float(rec_f.get("valor_recebido").sum()) if not rec_f.empty and "valor_recebido" in rec_f.columns else 0.0
         repasses = float(rep_f.get("valor_repasse").sum()) if not rep_f.empty and "valor_repasse" in rep_f.columns else 0.0
         mc_total = float(fin_f.get("mc").sum()) if not fin_f.empty and "mc" in fin_f.columns else (receita - repasses)
 
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Receita no período", f"R$ {receita:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
-        c2.metric("Repasses no período", f"R$ {repasses:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
-        c3.metric("Margem de Contribuição", f"R$ {mc_total:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+        c1.metric("Receita (período)", f"R$ {receita:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+        c2.metric("Repasses (período)", f"R$ {repasses:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+        c3.metric("MC (período)", f"R$ {mc_total:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
         inad = 0
         if not rec_f.empty and {"data_vencimento", "data_pagamento"} <= set(rec_f.columns):
             hoje = pd.Timestamp.today().normalize()
             pend = rec_f[(rec_f["data_pagamento"].isna()) & (pd.to_datetime(rec_f["data_vencimento"], errors="coerce") < hoje)]
             inad = float(pend.get("valor_recebido").sum()) if "valor_recebido" in pend.columns else 0.0
-        c4.metric("Inadimplência (valor em aberto)", f"R$ {inad:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+        c4.metric("Inadimplência (em aberto, período)", f"R$ {inad:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
 
         st.markdown("---")
         if not fin_f.empty:
-            st.caption("Tabela por atendimento (OS) — Receita x Repasse x MC")
+            st.caption("Por atendimento (OS) — apenas dentro do período")
             show_cols = [c for c in [
                 "os_id", "cliente_nome", "valor_recebido", "situacao", "data_pagamento",
                 "valor_repasse", "situacao_repasse", "data_pagamento_repasse", "mc",
@@ -642,7 +702,7 @@ with tabs[4]:
             rec_serie["mes"] = pd.to_datetime(rec_serie["data_pagamento"], errors="coerce").dt.to_period("M").dt.to_timestamp()
             g = rec_serie.groupby("mes")["valor_recebido"].sum().reset_index()
             if USE_PLOTLY:
-                charts[0].plotly_chart(px.bar(g, x="mes", y="valor_recebido", title="Receita por Mês"), use_container_width=True)
+                charts[0].plotly_chart(px.bar(g, x="mes", y="valor_recebido", title="Receita por Mês (período)"), use_container_width=True)
             else:
                 charts[0].bar_chart(g.set_index("mes")["valor_recebido"])
         if not rep_f.empty and "valor_repasse" in rep_f.columns and "data_pagamento_repasse" in rep_f.columns:
@@ -650,15 +710,15 @@ with tabs[4]:
             rep_serie["mes"] = pd.to_datetime(rep_serie["data_pagamento_repasse"], errors="coerce").dt.to_period("M").dt.to_timestamp()
             g2 = rep_serie.groupby("mes")["valor_repasse"].sum().reset_index()
             if USE_PLOTLY:
-                charts[1].plotly_chart(px.bar(g2, x="mes", y="valor_repasse", title="Repasses por Mês"), use_container_width=True)
+                charts[1].plotly_chart(px.bar(g2, x="mes", y="valor_repasse", title="Repasses por Mês (período)"), use_container_width=True)
             else:
                 charts[1].bar_chart(g2.set_index("mes")["valor_repasse"])
 
-# OS — Detalhe
+# OS — Detalhe (PERÍODO)
 with tabs[5]:
-    st.subheader("Consulta por OS (Atendimento)")
+    st.subheader("Consulta por OS (Atendimento) — período")
     if os_view.empty:
-        st.info("Não há dados suficientes para a visão por OS. Garanta Atendimentos, Receber e Repasses carregados.")
+        st.info("Não há dados suficientes no período selecionado.")
     else:
         os_view["os_id"] = os_view["os_id"].astype(str)
         sel_os = st.selectbox("Selecione a OS", options=sorted(os_view["os_id"].dropna().unique().tolist()))
@@ -701,4 +761,4 @@ with tabs[5]:
                 })
 
 st.markdown("---")
-st.caption("© Vavivê — Dashboard de indicadores. Sem sidebar. Pastas locais lidas e empilhadas automaticamente.")
+st.caption("© Vavivê — Dashboard de indicadores. Tudo sensível ao período selecionado.")
