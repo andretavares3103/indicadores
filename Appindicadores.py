@@ -4,7 +4,7 @@
 # -------------------------------------------------------------
 # Sem sidebar. Lê planilhas diretamente das pastas locais:
 #   ./Clientes, ./Profissionais, ./Atendimentos, ./Contas Receber, ./Repasses
-# Empilha (concatena) automaticamente se houver >1 arquivo por pasta.
+# Empilha (concatena) automaticamente todos os arquivos por pasta.
 # -------------------------------------------------------------
 
 import streamlit as st
@@ -42,6 +42,12 @@ def _slug(s: str) -> str:
         s = s.replace(ch, " ")
     return "_".join(s.split())
 
+def _norm_text(x) -> str:
+    """Normaliza textos para comparações (remove acentos e baixa)."""
+    if pd.isna(x):
+        return ""
+    return unicodedata.normalize("NFKD", str(x)).encode("ascii", "ignore").decode("ascii").strip().lower()
+
 def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     if df.empty:
@@ -50,14 +56,17 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def try_parse_date(x):
+    """Converte string, datetime ou serial numérico do Excel -> Timestamp."""
     if pd.isna(x):
         return pd.NaT
     if isinstance(x, (pd.Timestamp, datetime, date)):
         return pd.to_datetime(x)
-    try:
-        return pd.to_datetime(parser.parse(str(x), dayfirst=True, fuzzy=True))
-    except Exception:
-        return pd.NaT
+    if isinstance(x, (int, float)) and not np.isnan(x):
+        # serial Excel (dias desde 1899-12-30); aceita frações (horas)
+        if 59 < float(x) < 80000:
+            base = pd.Timestamp("1899-12-30")
+            return base + pd.to_timedelta(float(x), unit="D")
+    return pd.to_datetime(str(x), dayfirst=True, errors="coerce")
 
 def coalesce_inplace(df: pd.DataFrame, candidates: list[str], new: str) -> pd.DataFrame:
     for c in candidates:
@@ -78,10 +87,11 @@ def read_local_folder(
     preferred_sheet: str | None = None,
     recurse: bool = True,
     patterns: tuple[str, ...] = ("*.xlsx", "*.xls", "*.csv"),
+    alt_sheet_names: list[str] | None = None,
 ) -> pd.DataFrame:
     """
     Lê todos os arquivos suportados da pasta (e subpastas) e concatena.
-    - Excel: tenta uma aba alvo (preferred_sheet) e sinônimos antes de cair na 1ª.
+    - Excel: tenta preferred_sheet; se não houver, tenta alt_sheet_names; senão usa a 1ª.
     - CSV: detecta separador ';' ou ',' automaticamente.
     """
     if not folder_path:
@@ -92,7 +102,6 @@ def read_local_folder(
         st.warning(f"Pasta não encontrada: {base}")
         return pd.DataFrame()
 
-    # Coleta arquivos
     files: list[Path] = []
     if recurse:
         for pat in patterns:
@@ -103,25 +112,21 @@ def read_local_folder(
     if not files:
         return pd.DataFrame()
 
-    # Ordena por mtime (apenas para preencher _modified)
     files = sorted(files, key=lambda p: p.stat().st_mtime, reverse=True)
-
-    # Candidatos de nomes de abas quando não há preferred_sheet
-    sheet_candidates = [
-        preferred_sheet or "",
-        "Profissionais", "Profissional", "Prestadores", "Cadastro", "Dados"
-    ]
-    sheet_candidates = [c for c in sheet_candidates if c]
 
     def _guess_sep(sample: str) -> str:
         return ";" if sample.count(";") > sample.count(",") else ","
+
+    def _norm(x: str) -> str:
+        return _slug(x)
+
+    alt_sheet_names = alt_sheet_names or []
 
     dfs = []
     for p in files:
         try:
             suf = p.suffix.lower()
             if suf == ".csv":
-                # detectar separador
                 with open(p, "r", encoding="utf-8", errors="ignore") as f:
                     sample = f.read(8192)
                 sep = _guess_sep(sample)
@@ -131,14 +136,14 @@ def read_local_folder(
                 xls = pd.ExcelFile(p)
                 sheet_to_use = None
 
-                # 1) preferred_sheet explícita
+                # 1) preferred_sheet exata
                 if preferred_sheet and preferred_sheet in xls.sheet_names:
                     sheet_to_use = preferred_sheet
                 else:
-                    # 2) procurar nomes parecidos, normalizando
-                    slug_targets = {_slug(nm) for nm in sheet_candidates}
+                    # 2) match por nomes alternativos (normalizados)
+                    targets = {_norm(nm) for nm in ([preferred_sheet] if preferred_sheet else [])} | {_norm(nm) for nm in alt_sheet_names}
                     for nm in xls.sheet_names:
-                        if _slug(nm) in slug_targets:
+                        if _norm(nm) in targets:
                             sheet_to_use = nm
                             break
                     # 3) fallback: primeira aba
@@ -199,11 +204,14 @@ with st.expander("🔧 Diagnóstico das pastas"):
 # =============================================================
 # Carregar dados (concat automático) a partir das pastas
 # =============================================================
-raw_clientes = read_local_folder(local_dirs["clientes"],     preferred_sheet=None,                recurse=True)
-raw_prof     = read_local_folder(local_dirs["profissionais"], preferred_sheet="Profissionais",    recurse=True)  # 👈 ajuste aqui
-raw_atend    = read_local_folder(local_dirs["atendimentos"],  preferred_sheet="Clientes",         recurse=True)
-raw_receber  = read_local_folder(local_dirs["receber"],       preferred_sheet="Dados Financeiros",recurse=True)
-raw_repasses = read_local_folder(local_dirs["repasses"],      preferred_sheet="Dados Financeiros",recurse=True)
+raw_clientes = read_local_folder(local_dirs["clientes"],     preferred_sheet=None,                 recurse=True)
+raw_prof     = read_local_folder(local_dirs["profissionais"], preferred_sheet="Profissionais",     recurse=True,
+                                 alt_sheet_names=["Profissional", "Prestadores", "Cadastro", "Dados"])
+raw_atend    = read_local_folder(local_dirs["atendimentos"],  preferred_sheet="Clientes",          recurse=True)
+raw_receber  = read_local_folder(local_dirs["receber"],       preferred_sheet="Dados Financeiros", recurse=True,
+                                 alt_sheet_names=["Financeiro", "Receber", "Contas a Receber", "Dados"])
+raw_repasses = read_local_folder(local_dirs["repasses"],      preferred_sheet="Dados Financeiros", recurse=True,
+                                 alt_sheet_names=["Financeiro", "Repasses", "Repasse", "Dados"])
 
 # =============================================================
 # Normalização das bases
@@ -246,13 +254,19 @@ if not pro.empty:
 
 if not atd.empty:
     coalesce_inplace(atd, ["os", "os_id", "atendimento_id"], "os_id")
+    # Data do atendimento (inclui "Data 1" vindo da aba "Clientes")
     coalesce_inplace(atd, ["data_1", "data", "data_do_atendimento", "data_atendimento"], "data_atendimento")
     atd["data_atendimento"] = atd["data_atendimento"].apply(try_parse_date)
+    # Status (para contagem de concluídos/agendados/cancelados)
+    coalesce_inplace(
+        atd,
+        ["status_servico", "status", "status_do_servico", "situacao", "situacao_servico"],
+        "status_servico"
+    )
     atd.rename(columns={
         "cliente": "cliente_nome",
         "cliente_novo?": "cliente_novo",
         "origem_venda": "origem_venda",
-        "status_servico": "status_servico",
         "endereco_bairro": "bairro",
         "atendimento_bairro": "bairro",
         "atendimento_rua": "rua",
@@ -461,11 +475,15 @@ tabs = st.tabs([
 # Visão Geral
 with tabs[0]:
     st.subheader("KPIs do Período")
+
+    # Normaliza status para contagens robustas (ignora acento/maiúsculas)
+    status_norm = atd_f.get("status_servico").map(_norm_text) if ("status_servico" in atd_f.columns) else pd.Series(dtype=str)
+
     total_clientes = int(cli.shape[0]) if not cli.empty else 0
     total_prof = int(pro.shape[0]) if not pro.empty else 0
-    concl = int(atd_f[atd_f.get("status_servico").fillna("").str.lower().eq("concluido")].shape[0]) if not atd_f.empty and "status_servico" in atd_f.columns else 0
-    agend = int(atd_f[atd_f.get("status_servico").fillna("").str.lower().eq("agendado")].shape[0]) if not atd_f.empty and "status_servico" in atd_f.columns else 0
-    canc  = int(atd_f[atd_f.get("status_servico").fillna("").str.lower().eq("cancelado")].shape[0]) if not atd_f.empty and "status_servico" in atd_f.columns else 0
+    concl = int((status_norm == "concluido").sum()) if not atd_f.empty else 0
+    agend = int((status_norm == "agendado").sum()) if not atd_f.empty else 0
+    canc  = int((status_norm == "cancelado").sum()) if not atd_f.empty else 0
 
     receita = float(rec_f.get("valor_recebido").sum()) if not rec_f.empty and "valor_recebido" in rec_f.columns else 0.0
     repasses = float(rep_f.get("valor_repasse").sum()) if not rep_f.empty and "valor_repasse" in rep_f.columns else 0.0
@@ -538,8 +556,9 @@ with tabs[2]:
         total_prof = int(pro.shape[0]) if not pro.empty else 0
         cols[0].metric("Total de Profissionais (cadastro)", f"{total_prof:,}".replace(",", "."))
         if not atd_f.empty and "status_servico" in atd_f.columns:
-            concluidos = atd_f[atd_f["status_servico"].str.lower() == "concluido"]
-            cols[1].metric("Atendimentos Concluídos (período)", f"{concluidos.shape[0]:,}".replace(",", "."))
+            status_norm2 = atd_f["status_servico"].map(_norm_text)
+            concluidos = (status_norm2 == "concluido").sum()
+            cols[1].metric("Atendimentos Concluídos (período)", f"{int(concluidos):,}".replace(",", "."))
         else:
             cols[1].metric("Atendimentos Concluídos (período)", "0")
         if not pro.empty and {"att_feitos", "att_recusados"} <= set(pro.columns):
@@ -562,18 +581,20 @@ with tabs[3]:
         if {"data_atendimento", "status_servico"} <= set(atd_f.columns):
             tmp = atd_f.copy()
             tmp["dia"] = tmp["data_atendimento"].dt.to_period("D").dt.to_timestamp()
-            serie = tmp.groupby(["dia", "status_servico"]).size().reset_index(name="qtd")
+            tmp["status_norm"] = tmp["status_servico"].map(_norm_text)
+            serie = tmp.groupby(["dia", "status_norm"]).size().reset_index(name="qtd")
             if USE_PLOTLY:
-                fig = px.line(serie, x="dia", y="qtd", color="status_servico", markers=True, title="Atendimentos por Dia (por status)")
+                fig = px.line(serie, x="dia", y="qtd", color="status_norm", markers=True, title="Atendimentos por Dia (por status)")
                 st.plotly_chart(fig, use_container_width=True)
             else:
-                pivot = serie.pivot(index="dia", columns="status_servico", values="qtd").fillna(0).sort_index()
+                pivot = serie.pivot(index="dia", columns="status_norm", values="qtd").fillna(0).sort_index()
                 st.line_chart(pivot)
 
         cols = st.columns(3)
-        concl = int(atd_f[atd_f.get("status_servico").fillna("").str.lower().eq("concluido")].shape[0]) if "status_servico" in atd_f.columns else 0
-        agend = int(atd_f[atd_f.get("status_servico").fillna("").str.lower().eq("agendado")].shape[0]) if "status_servico" in atd_f.columns else 0
-        canc  = int(atd_f[atd_f.get("status_servico").fillna("").str.lower().eq("cancelado")].shape[0]) if "status_servico" in atd_f.columns else 0
+        status_norm3 = atd_f.get("status_servico").map(_norm_text) if ("status_servico" in atd_f.columns) else pd.Series(dtype=str)
+        concl = int((status_norm3 == "concluido").sum()) if not atd_f.empty else 0
+        agend = int((status_norm3 == "agendado").sum()) if not atd_f.empty else 0
+        canc  = int((status_norm3 == "cancelado").sum()) if not atd_f.empty else 0
         total = concl + agend + canc
         taxa_cancel = (canc / total * 100) if total > 0 else 0
         cols[0].metric("Concluídos", f"{concl:,}".replace(",", "."))
