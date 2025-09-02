@@ -7,6 +7,7 @@
 # Empilha (concat) automaticamente todos os arquivos por pasta.
 # Clientes e Profissionais NÃO são sensíveis ao período.
 # Atendimentos, Financeiro e OS são sensíveis ao período.
+# Nova aba: "Atendimento + Foto" (detalhes + imagem por URL HTTP)
 # -------------------------------------------------------------
 
 import streamlit as st
@@ -50,6 +51,10 @@ def _norm_text(x) -> str:
         return ""
     return unicodedata.normalize("NFKD", str(x)).encode("ascii", "ignore").decode("ascii").strip().lower()
 
+def _only_digits(x) -> str:
+    s = "" if pd.isna(x) else str(x)
+    return "".join(ch for ch in s if ch.isdigit())
+
 def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     if df.empty:
@@ -78,6 +83,59 @@ def coalesce_inplace(df: pd.DataFrame, candidates: list[str], new: str) -> pd.Da
     if new not in df.columns:
         df[new] = np.nan
     return df
+
+# --- Fotos de profissionais ---------------------------------------------------
+PHOTO_COLS = [
+    "foto_url", "foto", "imagem_url", "imagem",
+    "url_foto", "link_foto", "photo", "photo_url", "avatar", "avatar_url"
+]
+
+@st.cache_data(ttl=600, show_spinner=False)
+def load_photo_map() -> pd.DataFrame:
+    """Carrega uma tabela opcional com mapeamento de foto por CPF ou nome.
+    Aceita arquivos CSV/XLSX nos caminhos padrão abaixo, com colunas como
+    'prof_cpf'/'cpf' e 'foto_url'/'url'/'link' e opcionalmente 'prof_nome'/'nome'.
+    """
+    candidates = [
+        Path("./fotos_profissionais.csv"),
+        Path("./profissionais_fotos.csv"),
+        Path("./fotos.csv"),
+        Path("./Fotos/fotos_profissionais.csv"),
+        Path("./Fotos/fotos_profissionais.xlsx"),
+        Path("./Profissionais/fotos_profissionais.csv"),
+        Path("./Profissionais/fotos_profissionais.xlsx"),
+    ]
+    for p in candidates:
+        if p.exists():
+            try:
+                if p.suffix.lower() == ".csv":
+                    df = pd.read_csv(p)
+                else:
+                    xls = pd.ExcelFile(p)
+                    df = pd.read_excel(xls, sheet_name=xls.sheet_names[0])
+                df = normalize_columns(df)
+                # renomeia possíveis variações
+                ren = {}
+                for c in df.columns:
+                    if c in {"cpf", "profissional_cpf"}:
+                        ren[c] = "prof_cpf"
+                    if c in {"nome", "profissional", "prof_nome"}:
+                        ren[c] = "prof_nome"
+                    if c in {"foto", "foto_url", "url", "url_foto", "link", "link_foto", "imagem", "imagem_url", "photo", "photo_url", "avatar", "avatar_url"}:
+                        ren[c] = "foto_url"
+                df = df.rename(columns=ren)
+                keep = [c for c in ["prof_cpf", "prof_nome", "foto_url"] if c in df.columns]
+                if not keep or "foto_url" not in keep:
+                    continue
+                df = df[keep].copy()
+                if "prof_cpf" in df.columns:
+                    df["prof_cpf"] = df["prof_cpf"].astype(str).map(_only_digits)
+                if "prof_nome" in df.columns:
+                    df["prof_nome"] = df["prof_nome"].astype(str)
+                return df.dropna(subset=["foto_url"]).drop_duplicates()
+            except Exception:
+                continue
+    return pd.DataFrame()
 
 # =============================================================
 # Leitura local (pasta do repositório) — SEMPRE CONCAT
@@ -253,6 +311,12 @@ if not pro.empty:
     coalesce_inplace(pro, ["endereco_1_bairro", "endereco_bairro", "bairro"], "prof_bairro")
     coalesce_inplace(pro, ["endereco_1_cidade", "cidade"], "prof_cidade")
     coalesce_inplace(pro, ["endereco_1_cep", "cep"], "prof_cep")
+    # tenta detectar coluna de foto já no cadastro
+    if "foto_url" not in pro.columns:
+        for c in PHOTO_COLS:
+            if c in pro.columns:
+                pro["foto_url"] = pro[c]
+                break
     pro = pro.loc[:, ~pro.columns.duplicated()]
 
 if not atd.empty:
@@ -426,7 +490,10 @@ if not fin_f.empty:
 # =============================================================
 atd_base = pd.DataFrame()
 if not atd_f.empty:
-    keep_cols = [c for c in ["os_id", "cliente_nome", "data_atendimento", "valor_atendimento", "endereco", "rua", "bairro", "cidade", "cep", "complemento"] if c in atd_f.columns]
+    keep_cols = [c for c in [
+        "os_id", "cliente_nome", "data_atendimento", "valor_atendimento", "status_servico",
+        "endereco", "rua", "bairro", "cidade", "cep", "complemento"
+    ] if c in atd_f.columns]
     atd_base = atd_f[keep_cols].copy()
 
 fin_base = pd.DataFrame()
@@ -439,10 +506,34 @@ if not fin_f.empty:
 pro_base = pd.DataFrame()
 if not pro.empty:
     if "prof_cpf" in pro.columns:
-        pro_base = pro[[c for c in ["prof_cpf", "prof_nome", "prof_rua", "prof_bairro", "prof_cidade", "prof_cep"] if c in pro.columns]].drop_duplicates(subset=["prof_cpf"])
+        pro_base = pro[[c for c in ["prof_cpf", "prof_nome", "prof_rua", "prof_bairro", "prof_cidade", "prof_cep", "foto_url"] if c in pro.columns]].drop_duplicates(subset=["prof_cpf"])
     else:
-        pro_base = pro[[c for c in ["prof_nome", "prof_rua", "prof_bairro", "prof_cidade", "prof_cep"] if c in pro.columns]].drop_duplicates()
+        pro_base = pro[[c for c in ["prof_nome", "prof_rua", "prof_bairro", "prof_cidade", "prof_cep", "foto_url"] if c in pro.columns]].drop_duplicates()
 
+# ---- incorpora mapa externo de fotos (CPF ou nome) ----
+photo_map_df = load_photo_map()
+if not pro_base.empty and not photo_map_df.empty:
+    # por CPF
+    if "prof_cpf" in pro_base.columns and "prof_cpf" in photo_map_df.columns:
+        tmp = photo_map_df[["prof_cpf", "foto_url"]].dropna().copy()
+        tmp["prof_cpf"] = tmp["prof_cpf"].astype(str).map(_only_digits)
+        pro_base["prof_cpf"] = pro_base["prof_cpf"].astype(str).map(_only_digits)
+        pro_base = pro_base.merge(tmp.rename(columns={"foto_url": "foto_url_map"}), on="prof_cpf", how="left")
+    # por nome
+    if "prof_nome" in pro_base.columns and "prof_nome" in photo_map_df.columns:
+        tmp2 = photo_map_df[["prof_nome", "foto_url"]].dropna().copy()
+        tmp2["__nome_norm"] = tmp2["prof_nome"].astype(str).map(_norm_text)
+        pro_base["__nome_norm"] = pro_base["prof_nome"].astype(str).map(_norm_text)
+        pro_base = pro_base.merge(tmp2[["__nome_norm", "foto_url"]].rename(columns={"foto_url": "foto_url_map_nome"}), on="__nome_norm", how="left")
+    # prioriza cadastro > mapa CPF > mapa nome
+    if "foto_url" not in pro_base.columns:
+        pro_base["foto_url"] = np.nan
+    pro_base["foto_url"] = pro_base["foto_url"].fillna(pro_base.get("foto_url_map")).fillna(pro_base.get("foto_url_map_nome"))
+    for c in ["__nome_norm", "foto_url_map", "foto_url_map_nome"]:
+        if c in pro_base.columns:
+            pro_base.drop(columns=[c], inplace=True)
+
+# ---- monta OS VIEW ----
 os_view = pd.DataFrame()
 if not atd_base.empty or not fin_base.empty:
     if "os_id" in atd_base.columns: atd_base["os_id"] = atd_base["os_id"].astype(str)
@@ -477,6 +568,7 @@ tabs = st.tabs([
     "🧹 Atendimentos",
     "💰 Financeiro (Receber & Repasses)",
     "🔎 OS — Detalhe",
+    "🖼️ Atendimento + Foto",
 ])
 
 # Visão Geral
@@ -484,11 +576,11 @@ with tabs[0]:
     st.subheader("KPIs")
     status_norm = atd_f.get("status_servico").map(_norm_text) if ("status_servico" in atd_f.columns) else pd.Series(dtype=str)
 
-    # >>> Totais de cadastro (NÃO sensíveis ao período)
+    # Totais de cadastro (NÃO sensíveis ao período)
     total_clientes = int(cli.shape[0]) if not cli.empty else 0
     total_prof = int(pro.shape[0]) if not pro.empty else 0
 
-    # >>> Métricas sensíveis (Atend/Fin)
+    # Métricas sensíveis (Atend/Fin)
     concl = int((status_norm == "concluido").sum()) if not atd_f.empty else 0
     agend = int((status_norm == "agendado").sum()) if not atd_f.empty else 0
     canc  = int((status_norm == "cancelado").sum()) if not atd_f.empty else 0
@@ -692,6 +784,7 @@ with tabs[5]:
                     "OS": reg.get("os_id"),
                     "Cliente": reg.get("cliente_nome"),
                     "Data do Atendimento": (pd.to_datetime(reg.get("data_atendimento")).strftime('%d/%m/%Y') if pd.notna(reg.get("data_atendimento")) else "—"),
+                    "Status": reg.get("status_servico"),
                     "Endereço": reg.get("endereco") or reg.get("rua"),
                     "Bairro": reg.get("bairro"),
                     "Cidade": reg.get("cidade"),
@@ -708,5 +801,76 @@ with tabs[5]:
                     "CEP Profissional": reg.get("prof_cep"),
                 })
 
+# Atendimento + Foto (PERÍODO, com imagem por URL)
+with tabs[6]:
+    st.subheader("Atendimento + Foto")
+    if os_view.empty:
+        st.info("Não há dados suficientes no período selecionado.")
+    else:
+        os_view["os_id"] = os_view["os_id"].astype(str)
+        sel_os2 = st.selectbox("Selecione a OS (com foto)", options=sorted(os_view["os_id"].dropna().unique().tolist()), key="os_foto")
+        registro2 = os_view[os_view["os_id"] == str(sel_os2)].copy()
+        if registro2.empty:
+            st.warning("OS não encontrada na seleção.")
+        else:
+            reg = registro2.iloc[0]
+            # monta layout em 2 colunas: detalhes (2x) + foto (1x)
+            left, right = st.columns([2, 1])
+            with left:
+                st.markdown(f"#### OS #{reg.get('os_id','')} — {reg.get('cliente_nome','')}")
+                dt_txt = pd.to_datetime(reg.get("data_atendimento")).strftime('%d/%m/%Y') if pd.notna(reg.get("data_atendimento")) else "—"
+                st.write({
+                    "Data": dt_txt,
+                    "Status": reg.get("status_servico"),
+                    "Endereço": reg.get("endereco") or reg.get("rua"),
+                    "Bairro": reg.get("bairro"),
+                    "Cidade": reg.get("cidade"),
+                    "CEP": reg.get("cep"),
+                    "Profissional": reg.get("profissional_nome") or reg.get("prof_nome"),
+                    "CPF Profissional": reg.get("prof_cpf"),
+                })
+                st.markdown("**Financeiro**")
+                v_atend = float(reg.get("valor_atendimento", np.nan)) if not pd.isna(reg.get("valor_atendimento", np.nan)) else np.nan
+                v_pago  = float(reg.get("valor_recebido", 0) or 0)
+                v_rep   = float(reg.get("valor_repasse", 0) or 0)
+                mc      = float(reg.get("mc", v_pago - v_rep))
+                st.write({
+                    "Valor do Atendimento": ("R$ %0.2f" % v_atend).replace(".", ",") if not np.isnan(v_atend) else "—",
+                    "Valor Pago (Recebido)": ("R$ %0.2f" % v_pago).replace(".", ","),
+                    "Repasse": ("R$ %0.2f" % v_rep).replace(".", ","),
+                    "MC": ("R$ %0.2f" % mc).replace(".", ","),
+                })
+            with right:
+                # define URL da foto: prioriza 'foto_url' já presente no registro
+                foto_url = None
+                for c in ["foto_url", "foto", "imagem_url", "imagem", "url_foto", "link_foto", "photo_url", "avatar_url"]:
+                    if c in registro2.columns:
+                        val = reg.get(c)
+                        if isinstance(val, str) and val.strip():
+                            foto_url = val.strip()
+                            break
+                if not foto_url and "foto_url" in pro_base.columns:
+                    # tenta buscar via CPF ou nome no cadastro
+                    chave_ok = False
+                    if "prof_cpf" in reg and not pd.isna(reg.get("prof_cpf")) and "prof_cpf" in pro_base.columns:
+                        cpf_d = _only_digits(reg.get("prof_cpf"))
+                        rowp = pro_base[pro_base["prof_cpf"].astype(str).map(_only_digits) == cpf_d]
+                        if not rowp.empty:
+                            foto_url = rowp.iloc[0].get("foto_url")
+                            chave_ok = True
+                    if (not chave_ok) and ("profissional_nome" in reg or "prof_nome" in reg) and ("prof_nome" in pro_base.columns):
+                        nome = (reg.get("profissional_nome") or reg.get("prof_nome") or "")
+                        nome_n = _norm_text(nome)
+                        rowp = pro_base[pro_base["prof_nome"].astype(str).map(_norm_text) == nome_n]
+                        if not rowp.empty:
+                            foto_url = rowp.iloc[0].get("foto_url")
+                if isinstance(foto_url, str) and foto_url.startswith("http"):
+                    st.image(foto_url, caption=(reg.get("profissional_nome") or reg.get("prof_nome") or "Profissional"), use_column_width=True)
+                    st.caption("Fonte: URL definida no cadastro ou na tabela de fotos.")
+                elif isinstance(foto_url, str) and foto_url:
+                    st.write("**Link da foto:**", foto_url)
+                else:
+                    st.info("Sem URL de foto para esta profissional. Você pode fornecer uma tabela `fotos_profissionais.(csv|xlsx)` com colunas `prof_cpf`/`prof_nome` e `foto_url`.")
+
 st.markdown("---")
-st.caption("© Vavivê — Dashboard de indicadores. Clientes/Profissionais não filtram por período; Atendimentos/Financeiro/OS sim.")
+st.caption("© Vavivê — Dashboard de indicadores. Clientes/Profissionais não filtram por período; Atendimentos/Financeiro/OS sim. Aba 'Atendimento + Foto' usa URL de imagem do cadastro ou de tabela externa.")
