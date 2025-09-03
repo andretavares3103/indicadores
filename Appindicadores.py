@@ -5,13 +5,21 @@
 # Sem sidebar. Lê planilhas de pastas locais:
 #   ./Clientes, ./Profissionais, ./Atendimentos, ./Contas Receber, ./Repasses
 # Empilha (concat) automaticamente todos os arquivos por pasta.
-# Clientes e Profissionais NÃO são sensíveis ao período.
-# Atendimentos, Financeiro e OS são sensíveis ao período.
-# Aba extra: "Atendimento + Foto" (detalhes + imagem por URL HTTP)
-# Suporta fotos por:
-#   - coluna `foto_url` no cadastro de profissionais,
-#   - tabela externa (ex.: Carteirinhas.xlsx) com `prof_id`/`prof_cpf`/`prof_nome` -> `foto_url`,
-#   - template opcional em secrets: PHOTO_URL_TEMPLATE (ex.: https://cdn.site/{prof_id}.jpg)
+#
+# Regras de período (visão de CAIXA):
+# - Atendimentos: filtra por "Data 1" (mapeada para data_atendimento).
+# - Receber:
+#     * Recebidos  = tem data_pagamento → filtra por data_pagamento
+#     * A receber  = sem data_pagamento → filtra por data_vencimento
+# - Repasses:
+#     * Pagos      = tem data_pagamento_repasse → filtra por data_pagamento_repasse
+#     * A pagar    = sem data_pagamento_repasse → filtra por data_vencimento_repasse
+# - Clientes e Profissionais NÃO são sensíveis ao período.
+#
+# Fotos da profissional:
+#   1) Coluna foto_url no cadastro (se houver)
+#   2) Tabela externa "Carteirinhas.xlsx" (raiz) com colunas: prof_id/prof_cpf/prof_nome -> foto_url/imagen/imagem_url
+#   3) Template opcional em st.secrets["PHOTO_URL_TEMPLATE"], e.g. https://cdn.site/{prof_id}.jpg
 # -------------------------------------------------------------
 
 import streamlit as st
@@ -86,7 +94,10 @@ def coalesce_inplace(df: pd.DataFrame, candidates: list[str], new: str) -> pd.Da
         df[new] = np.nan
     return df
 
-# --- Config de fotos ----------------------------------------------------------
+# =============================================================
+# Fotos — mapeamento e template
+# =============================================================
+
 PHOTO_COLS = [
     "foto_url", "foto", "imagem_url", "imagem",
     "url_foto", "link_foto", "photo", "photo_url", "avatar", "avatar_url"
@@ -122,7 +133,7 @@ def load_photo_map() -> pd.DataFrame:
       - URL:   foto_url / imagem / imagem_url / url / url_foto / link / link_foto / photo / photo_url / avatar / avatar_url
     """
     candidates = [
-        Path("./Carteirinhas.xlsx"),                    # sua planilha
+        Path("./Carteirinhas.xlsx"),                    # planilha informada
         Path("./fotos_profissionais.csv"),
         Path("./profissionais_fotos.csv"),
         Path("./fotos.csv"),
@@ -259,6 +270,22 @@ local_dirs = {
 }
 
 # =============================================================
+# Diagnóstico (opcional)
+# =============================================================
+with st.expander("🔧 Diagnóstico das pastas"):
+    for nome, pth in local_dirs.items():
+        p = Path(pth).expanduser().resolve()
+        ok = p.exists() and p.is_dir()
+        st.write(f"{nome}: caminho='{p}', existe? {ok}")
+        if ok:
+            encontrados = (
+                sum(1 for _ in p.rglob("*.xlsx")) +
+                sum(1 for _ in p.rglob("*.xls")) +
+                sum(1 for _ in p.rglob("*.csv"))
+            )
+            st.write(f"Arquivos suportados encontrados: {encontrados}")
+
+# =============================================================
 # Carregar dados (concat)
 # =============================================================
 raw_clientes = read_local_folder(local_dirs["clientes"],     preferred_sheet=None,                 recurse=True)
@@ -317,8 +344,10 @@ if not pro.empty:
 
 if not atd.empty:
     coalesce_inplace(atd, ["os", "os_id", "atendimento_id"], "os_id")
+    # Data do atendimento (usa "Data 1" vindo da aba "Clientes")
     coalesce_inplace(atd, ["data_1", "data", "data_do_atendimento", "data_atendimento"], "data_atendimento")
     atd["data_atendimento"] = atd["data_atendimento"].apply(try_parse_date)
+    # Status (para contagem de concluídos/agendados/cancelados)
     coalesce_inplace(
         atd,
         ["status_servico", "status", "status_do_servico", "situacao", "situacao_servico"],
@@ -383,44 +412,10 @@ if not rep.empty:
     rep = rep.loc[:, ~rep.columns.duplicated()]
 
 # =============================================================
-# Montagem financeira (por OS)
-# =============================================================
-fin = pd.DataFrame()
-if not rec.empty or not rep.empty:
-    left = rec.copy() if not rec.empty else pd.DataFrame(columns=["os_id"])
-    right = rep.copy() if not rep.empty else pd.DataFrame(columns=["os_id"])
-    left["os_id"] = left["os_id"].astype(str)
-    right["os_id"] = right["os_id"].astype(str)
-
-    def _first_nonnull(s): return s.dropna().iloc[0] if s.dropna().size else np.nan
-
-    rec_ag = left.groupby("os_id", as_index=False).agg({
-        "cliente_nome": _first_nonnull if "cliente_nome" in left.columns else (lambda s: np.nan),
-        "valor_recebido": "sum" if "valor_recebido" in left.columns else (lambda s: np.nan),
-        "data_pagamento": "max" if "data_pagamento" in left.columns else (lambda s: np.nan),
-        "data_vencimento": "max" if "data_vencimento" in left.columns else (lambda s: np.nan),
-        "situacao": _first_nonnull if "situacao" in left.columns else (lambda s: np.nan),
-        "prof_cpf": _first_nonnull if "prof_cpf" in left.columns else (lambda s: np.nan),
-    }) if not left.empty else pd.DataFrame(columns=["os_id"])
-
-    rep_ag = right.groupby("os_id", as_index=False).agg({
-        "profissional_nome": _first_nonnull if "profissional_nome" in right.columns else (lambda s: np.nan),
-        "valor_repasse": "sum" if "valor_repasse" in right.columns else (lambda s: np.nan),
-        "data_pagamento_repasse": "max" if "data_pagamento_repasse" in right.columns else (lambda s: np.nan),
-        "data_vencimento_repasse": "max" if "data_vencimento_repasse" in right.columns else (lambda s: np.nan),
-        "situacao_repasse": _first_nonnull if "situacao_repasse" in right.columns else (lambda s: np.nan),
-        "prof_cpf": _first_nonnull if "prof_cpf" in right.columns else (lambda s: np.nan),
-    }) if not right.empty else pd.DataFrame(columns=["os_id"])
-
-    fin = pd.merge(rec_ag, rep_ag, on="os_id", how="outer", suffixes=("_rec", "_rep"))
-    if "valor_recebido" not in fin.columns: fin["valor_recebido"] = np.nan
-    if "valor_repasse" not in fin.columns: fin["valor_repasse"] = np.nan
-    fin["mc"] = fin["valor_recebido"].fillna(0) - fin["valor_repasse"].fillna(0)
-    fin = fin.loc[:, ~fin.columns.duplicated()]
-
-# =============================================================
 # Filtro de período (sem sidebar)
 # =============================================================
+
+# Coleta datas globais para default do widget
 all_dates = []
 for _df, cols in [
     (atd, ["data_atendimento"]),
@@ -443,46 +438,92 @@ sel_ini, sel_fim = st.date_input("Selecione o intervalo", value=(dmin, dmax))
 dt_ini = pd.to_datetime(sel_ini)
 dt_fim = pd.to_datetime(sel_fim)
 
-# Aplicar filtro nas tabelas sensíveis ao período
+# ------- aplica filtro nas tabelas sensíveis ao período -------
+# ATENDIMENTOS: usa Data 1 -> data_atendimento
 if not atd.empty and "data_atendimento" in atd.columns:
     atd_f = atd[(atd["data_atendimento"] >= dt_ini) & (atd["data_atendimento"] <= dt_fim)].copy()
 else:
     atd_f = atd.copy()
 
+# RECEBER: separar em recebidos (pelo pagamento) e a receber (pelo vencimento)
+rec_recebidos_f = pd.DataFrame()
+rec_a_receber_f = pd.DataFrame()
 if not rec.empty:
-    dt_rec = rec.copy()
-    if "data_pagamento" in dt_rec.columns and dt_rec["data_pagamento"].notna().any():
-        dt_rec["_data_fin"] = dt_rec["data_pagamento"].fillna(dt_rec.get("data_vencimento"))
-    else:
-        dt_rec["_data_fin"] = dt_rec.get("data_vencimento")
-    rec_f = dt_rec[(pd.to_datetime(dt_rec["_data_fin"], errors="coerce") >= dt_ini) &
-                   (pd.to_datetime(dt_rec["_data_fin"], errors="coerce") <= dt_fim)].copy()
-else:
-    rec_f = rec.copy()
+    # recebidos = tem data_pagamento
+    if "data_pagamento" in rec.columns:
+        rec_recebidos_f = rec[rec["data_pagamento"].notna()].copy()
+        rec_recebidos_f = rec_recebidos_f[
+            (pd.to_datetime(rec_recebidos_f["data_pagamento"], errors="coerce") >= dt_ini) &
+            (pd.to_datetime(rec_recebidos_f["data_pagamento"], errors="coerce") <= dt_fim)
+        ]
+        rec_recebidos_f["categoria_rec"] = "recebido"
+    # a receber = sem data_pagamento -> usa vencimento
+    if "data_vencimento" in rec.columns:
+        rec_a_receber_f = rec[rec["data_pagamento"].isna()].copy() if "data_pagamento" in rec.columns else rec.copy()
+        rec_a_receber_f = rec_a_receber_f[
+            (pd.to_datetime(rec_a_receber_f["data_vencimento"], errors="coerce") >= dt_ini) &
+            (pd.to_datetime(rec_a_receber_f["data_vencimento"], errors="coerce") <= dt_fim)
+        ]
+        rec_a_receber_f["categoria_rec"] = "a_receber"
 
+# REPASSES: separar pagos (pelo pagamento) e a pagar (pelo vencimento)
+rep_pagos_f = pd.DataFrame()
+rep_a_pagar_f = pd.DataFrame()
 if not rep.empty:
-    dt_rep = rep.copy()
-    base_col = "data_pagamento_repasse" if "data_pagamento_repasse" in dt_rep.columns else "data_vencimento_repasse"
-    if base_col in dt_rep.columns:
-        rep_f = dt_rep[(pd.to_datetime(dt_rep[base_col], errors="coerce") >= dt_ini) &
-                       (pd.to_datetime(dt_rep[base_col], errors="coerce") <= dt_fim)].copy()
-    else:
-        rep_f = rep.copy()
-else:
-    rep_f = rep.copy()
+    base_pg = "data_pagamento_repasse"
+    base_vc = "data_vencimento_repasse"
+    # pagos
+    if base_pg in rep.columns:
+        rep_pagos_f = rep[rep[base_pg].notna()].copy()
+        rep_pagos_f = rep_pagos_f[
+            (pd.to_datetime(rep_pagos_f[base_pg], errors="coerce") >= dt_ini) &
+            (pd.to_datetime(rep_pagos_f[base_pg], errors="coerce") <= dt_fim)
+        ]
+        rep_pagos_f["categoria_rep"] = "pago"
+    # a pagar
+    if base_vc in rep.columns:
+        rep_a_pagar_f = rep[rep[base_pg].isna()].copy() if base_pg in rep.columns else rep.copy()
+        rep_a_pagar_f = rep_a_pagar_f[
+            (pd.to_datetime(rep_a_pagar_f[base_vc], errors="coerce") >= dt_ini) &
+            (pd.to_datetime(rep_a_pagar_f[base_vc], errors="coerce") <= dt_fim)
+        ]
+        rep_a_pagar_f["categoria_rep"] = "a_pagar"
 
-fin_f = fin.copy()
-if not fin_f.empty:
-    fin_f["_data"] = pd.NaT
-    if "data_pagamento" in fin_f.columns:
-        fin_f["_data"] = fin_f["data_pagamento"].fillna(fin_f.get("data_vencimento"))
-    if "data_pagamento_repasse" in fin_f.columns:
-        fin_f["_data"] = fin_f["_data"].fillna(fin_f["data_pagamento_repasse"]).fillna(fin_f.get("data_vencimento_repasse"))
-    fin_f = fin_f[(pd.to_datetime(fin_f["_data"], errors="coerce") >= dt_ini) &
-                  (pd.to_datetime(fin_f["_data"], errors="coerce") <= dt_fim)].copy()
+# Para compatibilidade (se algo ainda usa rec_f/rep_f)
+rec_f = pd.concat([df for df in [rec_recebidos_f, rec_a_receber_f] if not df.empty], ignore_index=True) \
+        if (not rec_recebidos_f.empty or not rec_a_receber_f.empty) else rec.copy()
+rep_f = pd.concat([df for df in [rep_pagos_f, rep_a_pagar_f] if not df.empty], ignore_index=True) \
+        if (not rep_pagos_f.empty or not rep_a_pagar_f.empty) else rep.copy()
+
+# ========= Financeiro (no período) por OS =========
+def _agg_sum(df, key, value_col, newname):
+    if df.empty or value_col not in df.columns:
+        return pd.DataFrame(columns=[key, newname])
+    g = df.groupby(key, as_index=False)[value_col].sum().rename(columns={value_col: newname})
+    g[key] = g[key].astype(str)
+    return g
+
+# Garantir os_id como string nas bases
+for _df in [rec_recebidos_f, rec_a_receber_f, rep_pagos_f, rep_a_pagar_f]:
+    if not _df.empty and "os_id" in _df.columns:
+        _df["os_id"] = _df["os_id"].astype(str)
+
+rec_pg_ag = _agg_sum(rec_recebidos_f, "os_id", "valor_recebido", "valor_recebido")                 # recebidos (CAIXA)
+rec_ar_ag = _agg_sum(rec_a_receber_f, "os_id", "valor_recebido", "valor_a_receber")               # aberto
+rep_pg_ag = _agg_sum(rep_pagos_f, "os_id", "valor_repasse", "valor_repasse")                      # pagos (CAIXA)
+rep_ap_ag = _agg_sum(rep_a_pagar_f, "os_id", "valor_repasse", "valor_repasse_a_pagar")            # aberto
+
+fin_f = rec_pg_ag.merge(rec_ar_ag, on="os_id", how="outer") \
+                 .merge(rep_pg_ag, on="os_id", how="outer") \
+                 .merge(rep_ap_ag, on="os_id", how="outer")
+
+for c in ["valor_recebido", "valor_a_receber", "valor_repasse", "valor_repasse_a_pagar"]:
+    if c not in fin_f.columns: fin_f[c] = 0.0
+fin_f["mc"] = fin_f["valor_recebido"] - fin_f["valor_repasse"]  # MC caixa
+fin_f["mc_projetada"] = (fin_f["valor_recebido"] + fin_f["valor_a_receber"]) - (fin_f["valor_repasse"] + fin_f["valor_repasse_a_pagar"])
 
 # =============================================================
-# OS unificada (Atend + Financeiro + Prof)
+# View auxiliar — OS unificada (Atend + Financeiro + Prof)
 # =============================================================
 atd_base = pd.DataFrame()
 if not atd_f.empty:
@@ -495,8 +536,7 @@ if not atd_f.empty:
 fin_base = pd.DataFrame()
 if not fin_f.empty:
     fin_base = fin_f[[c for c in [
-        "os_id", "cliente_nome", "valor_recebido", "situacao", "data_pagamento",
-        "valor_repasse", "situacao_repasse", "data_pagamento_repasse", "mc", "prof_cpf", "profissional_nome"
+        "os_id", "valor_recebido", "valor_a_receber", "valor_repasse", "valor_repasse_a_pagar", "mc", "mc_projetada"
     ] if c in fin_f.columns]].copy()
 
 # Cadastro completo de profissionais (não sensível ao período)
@@ -540,7 +580,7 @@ if not pro_base.empty and not photo_map_df.empty:
         if c in pro_base.columns:
             pro_base.drop(columns=[c], inplace=True)
 
-# Monta OS view
+# Monta OS view (período) + enriquecimento de profissionais
 os_view = pd.DataFrame()
 if not atd_base.empty or not fin_base.empty:
     if "os_id" in atd_base.columns: atd_base["os_id"] = atd_base["os_id"].astype(str)
@@ -553,6 +593,7 @@ if not atd_base.empty or not fin_base.empty:
         os_view = pd.merge(atd_base, fin_base, on=common, how="outer") if common else pd.concat([atd_base.reset_index(drop=True), fin_base.reset_index(drop=True)], axis=1)
 
     if not pro_base.empty:
+        # Preferência: por CPF; fallback por nome
         if ("prof_cpf" in os_view.columns) and ("prof_cpf" in pro_base.columns):
             os_view = pd.merge(os_view, pro_base, on="prof_cpf", how="left")
         elif ("profissional_nome" in os_view.columns) and ("prof_nome" in pro_base.columns):
@@ -573,7 +614,7 @@ tabs = st.tabs([
     "👥 Clientes & Regiões",
     "🧑‍💼 Profissionais",
     "🧹 Atendimentos",
-    "💰 Financeiro (Receber & Repasses)",
+    "💰 Financeiro (Recebidos/A Receber & Pagos/A Pagar)",
     "🔎 OS — Detalhe",
     "🖼️ Atendimento + Foto",
 ])
@@ -583,16 +624,22 @@ with tabs[0]:
     st.subheader("KPIs")
     status_norm = atd_f.get("status_servico").map(_norm_text) if ("status_servico" in atd_f.columns) else pd.Series(dtype=str)
 
-    total_clientes = int(cli.shape[0]) if not cli.empty else 0      # NÃO sensível
-    total_prof = int(pro.shape[0]) if not pro.empty else 0          # NÃO sensível
+    # NÃO sensíveis
+    total_clientes = int(cli.shape[0]) if not cli.empty else 0
+    total_prof = int(pro.shape[0]) if not pro.empty else 0
 
+    # Atendimentos (período)
     concl = int((status_norm == "concluido").sum()) if not atd_f.empty else 0
     agend = int((status_norm == "agendado").sum()) if not atd_f.empty else 0
     canc  = int((status_norm == "cancelado").sum()) if not atd_f.empty else 0
 
-    receita = float(rec_f.get("valor_recebido").sum()) if not rec_f.empty and "valor_recebido" in rec_f.columns else 0.0
-    repasses = float(rep_f.get("valor_repasse").sum()) if not rep_f.empty and "valor_repasse" in rep_f.columns else 0.0
-    mc_total = float(fin_f.get("mc").sum()) if not fin_f.empty and "mc" in fin_f.columns else (receita - repasses)
+    # Caixa do período
+    receita     = float(rec_recebidos_f.get("valor_recebido", pd.Series(dtype=float)).sum()) if not rec_recebidos_f.empty else 0.0
+    a_receber   = float(rec_a_receber_f.get("valor_recebido", pd.Series(dtype=float)).sum()) if not rec_a_receber_f.empty else 0.0
+    repasses    = float(rep_pagos_f.get("valor_repasse", pd.Series(dtype=float)).sum()) if not rep_pagos_f.empty else 0.0
+    a_pagar     = float(rep_a_pagar_f.get("valor_repasse", pd.Series(dtype=float)).sum()) if not rep_a_pagar_f.empty else 0.0
+    mc_caixa    = receita - repasses
+    mc_proj     = (receita + a_receber) - (repasses + a_pagar)
 
     c1, c2, c3, c4, c5, c6 = st.columns(6)
     c1.metric("Clientes (cadastro)", f"{total_clientes:,}".replace(",", "."))
@@ -600,10 +647,9 @@ with tabs[0]:
     c3.metric("Concluídos (período)", f"{concl:,}".replace(",", "."))
     c4.metric("Agendados (período)", f"{agend:,}".replace(",", "."))
     c5.metric("Cancelados (período)", f"{canc:,}".replace(",", "."))
-    c6.metric("MC (período)", f"R$ {mc_total:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+    c6.metric("MC (Caixa, período)", f"R$ {mc_caixa:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
 
-    st.markdown("---")
-    st.caption("MC = Receita (Contas a Receber) − Repasses às Profissionais (no período).")
+    st.caption(f"MC projetada (recebidos+a receber - pagos-a pagar): R$ {mc_proj:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
 
 # Clientes & Regiões (NÃO sensível ao período)
 with tabs[1]:
@@ -709,54 +755,53 @@ with tabs[3]:
         st.markdown("---")
         st.dataframe(atd_f.head(200))
 
-# Financeiro (PERÍODO)
+# Financeiro (PERÍODO) — visão de caixa e aberto
 with tabs[4]:
-    st.subheader("Receita, Repasses e MC (no período)")
-    if fin_f.empty and rec_f.empty and rep_f.empty:
-        st.warning("Sem dados financeiros no período.")
-    else:
-        receita = float(rec_f.get("valor_recebido").sum()) if not rec_f.empty and "valor_recebido" in rec_f.columns else 0.0
-        repasses = float(rep_f.get("valor_repasse").sum()) if not rep_f.empty and "valor_repasse" in rep_f.columns else 0.0
-        mc_total = float(fin_f.get("mc").sum()) if not fin_f.empty and "mc" in fin_f.columns else (receita - repasses)
+    st.subheader("Recebidos/A Receber & Pagos/A Pagar (período)")
 
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Receita (período)", f"R$ {receita:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
-        c2.metric("Repasses (período)", f"R$ {repasses:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
-        c3.metric("MC (período)", f"R$ {mc_total:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
-        inad = 0
-        if not rec_f.empty and {"data_vencimento", "data_pagamento"} <= set(rec_f.columns):
-            hoje = pd.Timestamp.today().normalize()
-            pend = rec_f[(rec_f["data_pagamento"].isna()) & (pd.to_datetime(rec_f["data_vencimento"], errors="coerce") < hoje)]
-            inad = float(pend.get("valor_recebido").sum()) if "valor_recebido" in pend.columns else 0.0
-        c4.metric("Inadimplência (em aberto, período)", f"R$ {inad:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+    receita     = float(rec_recebidos_f.get("valor_recebido", pd.Series(dtype=float)).sum()) if not rec_recebidos_f.empty else 0.0
+    a_receber   = float(rec_a_receber_f.get("valor_recebido", pd.Series(dtype=float)).sum()) if not rec_a_receber_f.empty else 0.0
+    repasses    = float(rep_pagos_f.get("valor_repasse", pd.Series(dtype=float)).sum()) if not rep_pagos_f.empty else 0.0
+    a_pagar     = float(rep_a_pagar_f.get("valor_repasse", pd.Series(dtype=float)).sum()) if not rep_a_pagar_f.empty else 0.0
+    mc_caixa    = receita - repasses
+    mc_proj     = (receita + a_receber) - (repasses + a_pagar)
 
-        st.markdown("---")
-        if not fin_f.empty:
-            st.caption("Por atendimento (OS) — dentro do período")
-            show_cols = [c for c in [
-                "os_id", "cliente_nome", "valor_recebido", "situacao", "data_pagamento",
-                "valor_repasse", "situacao_repasse", "data_pagamento_repasse", "mc",
-            ] if c in fin_f.columns]
-            fin_view = fin_f.loc[:, ~fin_f.columns.duplicated()]
-            st.dataframe(fin_view[show_cols].sort_values("mc", ascending=False).reset_index(drop=True))
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    c1.metric("Recebidos (caixa)", f"R$ {receita:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+    c2.metric("A Receber (aberto)", f"R$ {a_receber:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+    c3.metric("Repasses Pagos", f"R$ {repasses:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+    c4.metric("Repasses a Pagar", f"R$ {a_pagar:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+    c5.metric("MC (Caixa)", f"R$ {mc_caixa:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+    c6.metric("MC Projetada", f"R$ {mc_proj:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
 
-        charts = st.columns(2)
-        if not rec_f.empty and "valor_recebido" in rec_f.columns and "data_pagamento" in rec_f.columns:
-            rec_serie = rec_f.copy()
-            rec_serie["mes"] = pd.to_datetime(rec_serie["data_pagamento"], errors="coerce").dt.to_period("M").dt.to_timestamp()
-            g = rec_serie.groupby("mes")["valor_recebido"].sum().reset_index()
-            if USE_PLOTLY:
-                charts[0].plotly_chart(px.bar(g, x="mes", y="valor_recebido", title="Receita por Mês (período)"), use_container_width=True)
-            else:
-                charts[0].bar_chart(g.set_index("mes")["valor_recebido"])
-        if not rep_f.empty and "valor_repasse" in rep_f.columns and "data_pagamento_repasse" in rep_f.columns:
-            rep_serie = rep_f.copy()
-            rep_serie["mes"] = pd.to_datetime(rep_serie["data_pagamento_repasse"], errors="coerce").dt.to_period("M").dt.to_timestamp()
-            g2 = rep_serie.groupby("mes")["valor_repasse"].sum().reset_index()
-            if USE_PLOTLY:
-                charts[1].plotly_chart(px.bar(g2, x="mes", y="valor_repasse", title="Repasses por Mês (período)"), use_container_width=True)
-            else:
-                charts[1].bar_chart(g2.set_index("mes")["valor_repasse"])
+    st.markdown("---")
+    if not fin_f.empty:
+        st.caption("Por atendimento (OS) — dentro do período")
+        show_cols = [c for c in [
+            "os_id", "valor_recebido", "valor_a_receber",
+            "valor_repasse", "valor_repasse_a_pagar",
+            "mc", "mc_projetada"
+        ] if c in fin_f.columns]
+        fin_view = fin_f.loc[:, ~fin_f.columns.duplicated()]
+        st.dataframe(fin_view[show_cols].sort_values("mc", ascending=False).reset_index(drop=True))
+
+    charts = st.columns(2)
+    if not rec_recebidos_f.empty and "valor_recebido" in rec_recebidos_f.columns and "data_pagamento" in rec_recebidos_f.columns:
+        rec_serie = rec_recebidos_f.copy()
+        rec_serie["mes"] = pd.to_datetime(rec_serie["data_pagamento"], errors="coerce").dt.to_period("M").dt.to_timestamp()
+        g = rec_serie.groupby("mes")["valor_recebido"].sum().reset_index()
+        if USE_PLOTLY:
+            charts[0].plotly_chart(px.bar(g, x="mes", y="valor_recebido", title="Recebidos por Mês (caixa)"), use_container_width=True)
+        else:
+            charts[0].bar_chart(g.set_index("mes")["valor_recebido"])
+    if not rep_pagos_f.empty and "valor_repasse" in rep_pagos_f.columns and "data_pagamento_repasse" in rep_pagos_f.columns:
+        rep_serie = rep_pagos_f.copy()
+        rep_serie["mes"] = pd.to_datetime(rep_serie["data_pagamento_repasse"], errors="coerce").dt.to_period("M").dt.to_timestamp()
+        g2 = rep_serie.groupby("mes")["valor_repasse"].sum().reset_index()
+        if USE_PLOTLY:
+            charts[1].plotly_chart(px.bar(g2, x="mes", y="valor_repasse", title="Repasses Pagos por Mês (caixa)"), use_container_width=True)
+        else:
+            charts[1].bar_chart(g2.set_index("mes")["valor_repasse"])
 
 # OS — Detalhe (PERÍODO)
 with tabs[5]:
@@ -772,14 +817,18 @@ with tabs[5]:
         else:
             reg = registro.iloc[0]
             v_atend = float(reg.get("valor_atendimento", np.nan)) if not pd.isna(reg.get("valor_atendimento", np.nan)) else np.nan
-            v_pago  = float(reg.get("valor_recebido", 0) or 0)
+            v_rec   = float(reg.get("valor_recebido", 0) or 0)
+            v_ar    = float(reg.get("valor_a_receber", 0) or 0)
             v_rep   = float(reg.get("valor_repasse", 0) or 0)
-            mc      = float(reg.get("mc", v_pago - v_rep))
+            v_ap    = float(reg.get("valor_repasse_a_pagar", 0) or 0)
+            mc      = float(reg.get("mc", v_rec - v_rep))
+            mc_proj = float(reg.get("mc_projetada", (v_rec + v_ar) - (v_rep + v_ap)))
             k1, k2, k3, k4 = st.columns(4)
             k1.metric("Valor do Atendimento", ("R$ %0.2f" % v_atend).replace(".", ",") if not np.isnan(v_atend) else "—")
-            k2.metric("Valor Pago (Recebido)", ("R$ %0.2f" % v_pago).replace(".", ","))
-            k3.metric("Repasse", ("R$ %0.2f" % v_rep).replace(".", ","))
-            k4.metric("MC (Pago − Repasse)", ("R$ %0.2f" % mc).replace(".", ","))
+            k2.metric("Recebidos (OS)", ("R$ %0.2f" % v_rec).replace(".", ","))
+            k3.metric("Repasses Pagos (OS)", ("R$ %0.2f" % v_rep).replace(".", ","))
+            k4.metric("MC (Caixa, OS)", ("R$ %0.2f" % mc).replace(".", ","))
+            st.caption(f"MC projetada (OS): {('R$ %0.2f' % mc_proj).replace('.', ',')}")
             st.markdown("---")
             c1, c2 = st.columns(2)
             with c1:
@@ -795,7 +844,7 @@ with tabs[5]:
                     "CEP": reg.get("cep"),
                 })
             with c2:
-                st.markdown("### Profissional & Repasse")
+                st.markdown("### Profissional & Endereço (cadastro)")
                 st.write({
                     "Profissional": reg.get("profissional_nome") or reg.get("prof_nome"),
                     "CPF Profissional": reg.get("prof_cpf"),
@@ -833,15 +882,19 @@ with tabs[6]:
                     "CPF Profissional": reg.get("prof_cpf"),
                 })
                 st.markdown("**Financeiro**")
-                v_atend = float(reg.get("valor_atendimento", np.nan)) if not pd.isna(reg.get("valor_atendimento", np.nan)) else np.nan
-                v_pago  = float(reg.get("valor_recebido", 0) or 0)
+                v_rec   = float(reg.get("valor_recebido", 0) or 0)
+                v_ar    = float(reg.get("valor_a_receber", 0) or 0)
                 v_rep   = float(reg.get("valor_repasse", 0) or 0)
-                mc      = float(reg.get("mc", v_pago - v_rep))
+                v_ap    = float(reg.get("valor_repasse_a_pagar", 0) or 0)
+                mc      = float(reg.get("mc", v_rec - v_rep))
+                mc_proj = float(reg.get("mc_projetada", (v_rec + v_ar) - (v_rep + v_ap)))
                 st.write({
-                    "Valor do Atendimento": ("R$ %0.2f" % v_atend).replace(".", ",") if not np.isnan(v_atend) else "—",
-                    "Valor Pago (Recebido)": ("R$ %0.2f" % v_pago).replace(".", ","),
-                    "Repasse": ("R$ %0.2f" % v_rep).replace(".", ","),
-                    "MC": ("R$ %0.2f" % mc).replace(".", ","),
+                    "Recebidos (OS)": ("R$ %0.2f" % v_rec).replace(".", ","),
+                    "A Receber (OS)": ("R$ %0.2f" % v_ar).replace(".", ","),
+                    "Repasses Pagos (OS)": ("R$ %0.2f" % v_rep).replace(".", ","),
+                    "Repasses a Pagar (OS)": ("R$ %0.2f" % v_ap).replace(".", ","),
+                    "MC (Caixa)": ("R$ %0.2f" % mc).replace(".", ","),
+                    "MC Projetada": ("R$ %0.2f" % mc_proj).replace(".", ","),
                 })
             with right:
                 # 1) já no registro
@@ -883,11 +936,11 @@ with tabs[6]:
 
                 if isinstance(foto_url, str) and foto_url.startswith("http"):
                     st.image(foto_url, caption=(reg.get("profissional_nome") or reg.get("prof_nome") or "Profissional"), use_column_width=True)
-                    st.caption("Fonte: cadastro/tabela de fotos (ex.: Carteirinhas.xlsx) ou PHOTO_URL_TEMPLATE.")
+                    st.caption("Fonte: cadastro/Carteirinhas.xlsx ou PHOTO_URL_TEMPLATE.")
                 elif isinstance(foto_url, str) and foto_url:
                     st.write("**Link da foto:**", foto_url)
                 else:
-                    st.info("Sem foto para esta profissional. Adicione em `Carteirinhas.xlsx` (colunas: `prof_id`, `foto_url`/`imagem`).")
+                    st.info("Sem foto para esta profissional. Adicione em `Carteirinhas.xlsx` (colunas: `prof_id` e `foto_url`/`imagem`).")
 
 st.markdown("---")
-st.caption("© Vavivê — Dashboard de indicadores. Clientes/Profissionais não filtram por período; Atendimentos/Financeiro/OS sim. Aba 'Atendimento + Foto' usa URL de imagem por prof_id/CPF/nome.")
+st.caption("© Vavivê — Dashboard. Clientes/Profissionais não filtram por período; Atendimentos/Financeiro/OS sim. Financeiro segue lógica de caixa (recebidos/pagos) e aberto (a receber/a pagar).")
