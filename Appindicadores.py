@@ -90,11 +90,33 @@ PHOTO_COLS = [
     "url_foto", "link_foto", "photo", "photo_url", "avatar", "avatar_url"
 ]
 
+
+# --- Suporte a foto por ID (template opcional em Secrets) ---
+# Ex.: st.secrets["PHOTO_URL_TEMPLATE"] = "https://cdn.exemplo.com/profissionais/{prof_id}.jpg"
+PHOTO_URL_TEMPLATE = st.secrets.get("PHOTO_URL_TEMPLATE", "")
+
+def build_photo_from_template(prof_id: str | None = None, prof_cpf: str | None = None, os_id: str | None = None) -> str | None:
+    """Monta URL da foto usando um template opcional.
+    Placeholders aceitos no template: {prof_id}, {prof_cpf}, {os_id}
+    """
+    tpl = str(PHOTO_URL_TEMPLATE or "").strip()
+    if not tpl:
+        return None
+    try:
+        return tpl.format(
+            prof_id=(str(prof_id) if prof_id is not None else ""),
+            prof_cpf=_only_digits(prof_cpf) if prof_cpf else "",
+            os_id=(str(os_id) if os_id is not None else ""),
+        )
+    except Exception:
+        return None
+
 @st.cache_data(ttl=600, show_spinner=False)
 def load_photo_map() -> pd.DataFrame:
-    """Carrega uma tabela opcional com mapeamento de foto por CPF ou nome.
+    """Carrega uma tabela opcional com mapeamento de foto por ID, CPF ou nome.
     Aceita arquivos CSV/XLSX nos caminhos padrão abaixo, com colunas como
-    'prof_cpf'/'cpf' e 'foto_url'/'url'/'link' e opcionalmente 'prof_nome'/'nome'.
+    'prof_id'/'id'/'id_profissional', 'prof_cpf'/'cpf', 'prof_nome'/'nome' e
+    'foto_url'/'url'/'link'.
     """
     candidates = [
         Path("./fotos_profissionais.csv"),
@@ -117,6 +139,8 @@ def load_photo_map() -> pd.DataFrame:
                 # renomeia possíveis variações
                 ren = {}
                 for c in df.columns:
+                    if c in {"id", "prof_id", "id_profissional", "id_prof"}:
+                        ren[c] = "prof_id"
                     if c in {"cpf", "profissional_cpf"}:
                         ren[c] = "prof_cpf"
                     if c in {"nome", "profissional", "prof_nome"}:
@@ -124,10 +148,12 @@ def load_photo_map() -> pd.DataFrame:
                     if c in {"foto", "foto_url", "url", "url_foto", "link", "link_foto", "imagem", "imagem_url", "photo", "photo_url", "avatar", "avatar_url"}:
                         ren[c] = "foto_url"
                 df = df.rename(columns=ren)
-                keep = [c for c in ["prof_cpf", "prof_nome", "foto_url"] if c in df.columns]
+                keep = [c for c in ["prof_id", "prof_cpf", "prof_nome", "foto_url"] if c in df.columns]
                 if not keep or "foto_url" not in keep:
                     continue
                 df = df[keep].copy()
+                if "prof_id" in df.columns:
+                    df["prof_id"] = df["prof_id"].astype(str)
                 if "prof_cpf" in df.columns:
                     df["prof_cpf"] = df["prof_cpf"].astype(str).map(_only_digits)
                 if "prof_nome" in df.columns:
@@ -506,13 +532,19 @@ if not fin_f.empty:
 pro_base = pd.DataFrame()
 if not pro.empty:
     if "prof_cpf" in pro.columns:
-        pro_base = pro[[c for c in ["prof_cpf", "prof_nome", "prof_rua", "prof_bairro", "prof_cidade", "prof_cep", "foto_url"] if c in pro.columns]].drop_duplicates(subset=["prof_cpf"])
+        pro_base = pro[[c for c in ["prof_id", "prof_cpf", "prof_nome", "prof_rua", "prof_bairro", "prof_cidade", "prof_cep", "foto_url"] if c in pro.columns]].drop_duplicates(subset=["prof_cpf"])
     else:
-        pro_base = pro[[c for c in ["prof_nome", "prof_rua", "prof_bairro", "prof_cidade", "prof_cep", "foto_url"] if c in pro.columns]].drop_duplicates()
+        pro_base = pro[[c for c in ["prof_id", "prof_nome", "prof_rua", "prof_bairro", "prof_cidade", "prof_cep", "foto_url"] if c in pro.columns]].drop_duplicates()
 
-# ---- incorpora mapa externo de fotos (CPF ou nome) ----
+# ---- incorpora mapa externo de fotos (ID, CPF ou nome) ----
 photo_map_df = load_photo_map()
 if not pro_base.empty and not photo_map_df.empty:
+    # por ID
+    if "prof_id" in pro_base.columns and "prof_id" in photo_map_df.columns:
+        tmp_id = photo_map_df[["prof_id", "foto_url"]].dropna().copy()
+        tmp_id["prof_id"] = tmp_id["prof_id"].astype(str)
+        pro_base["prof_id"] = pro_base["prof_id"].astype(str)
+        pro_base = pro_base.merge(tmp_id.rename(columns={"foto_url": "foto_url_map_id"}), on="prof_id", how="left")
     # por CPF
     if "prof_cpf" in pro_base.columns and "prof_cpf" in photo_map_df.columns:
         tmp = photo_map_df[["prof_cpf", "foto_url"]].dropna().copy()
@@ -525,11 +557,13 @@ if not pro_base.empty and not photo_map_df.empty:
         tmp2["__nome_norm"] = tmp2["prof_nome"].astype(str).map(_norm_text)
         pro_base["__nome_norm"] = pro_base["prof_nome"].astype(str).map(_norm_text)
         pro_base = pro_base.merge(tmp2[["__nome_norm", "foto_url"]].rename(columns={"foto_url": "foto_url_map_nome"}), on="__nome_norm", how="left")
-    # prioriza cadastro > mapa CPF > mapa nome
+    # prioriza: cadastro > mapa ID > mapa CPF > mapa nome
     if "foto_url" not in pro_base.columns:
         pro_base["foto_url"] = np.nan
-    pro_base["foto_url"] = pro_base["foto_url"].fillna(pro_base.get("foto_url_map")).fillna(pro_base.get("foto_url_map_nome"))
-    for c in ["__nome_norm", "foto_url_map", "foto_url_map_nome"]:
+    pro_base["foto_url"] = (
+        pro_base["foto_url"].fillna(pro_base.get("foto_url_map_id")).fillna(pro_base.get("foto_url_map")).fillna(pro_base.get("foto_url_map_nome"))
+    )
+    for c in ["__nome_norm", "foto_url_map_id", "foto_url_map", "foto_url_map_nome"]:
         if c in pro_base.columns:
             pro_base.drop(columns=[c], inplace=True)
 
@@ -850,9 +884,15 @@ with tabs[6]:
                             foto_url = val.strip()
                             break
                 if not foto_url and "foto_url" in pro_base.columns:
-                    # tenta buscar via CPF ou nome no cadastro
+                    # tenta buscar via ID, CPF ou Nome no cadastro
                     chave_ok = False
-                    if "prof_cpf" in reg and not pd.isna(reg.get("prof_cpf")) and "prof_cpf" in pro_base.columns:
+                    if "prof_id" in reg and not pd.isna(reg.get("prof_id")) and "prof_id" in pro_base.columns:
+                        pid = str(reg.get("prof_id"))
+                        rowp = pro_base[pro_base["prof_id"].astype(str) == pid]
+                        if not rowp.empty:
+                            foto_url = rowp.iloc[0].get("foto_url")
+                            chave_ok = True
+                    if (not chave_ok) and ("prof_cpf" in reg) and ("prof_cpf" in pro_base.columns) and not pd.isna(reg.get("prof_cpf")):
                         cpf_d = _only_digits(reg.get("prof_cpf"))
                         rowp = pro_base[pro_base["prof_cpf"].astype(str).map(_only_digits) == cpf_d]
                         if not rowp.empty:
@@ -864,10 +904,20 @@ with tabs[6]:
                         rowp = pro_base[pro_base["prof_nome"].astype(str).map(_norm_text) == nome_n]
                         if not rowp.empty:
                             foto_url = rowp.iloc[0].get("foto_url")
+                # fallback por template com ID/CPF/OS
+                if not foto_url:
+                    foto_url = build_photo_from_template(
+                        prof_id=reg.get("prof_id"),
+                        prof_cpf=reg.get("prof_cpf"),
+                        os_id=reg.get("os_id"),
+                    )
                 if isinstance(foto_url, str) and foto_url.startswith("http"):
                     st.image(foto_url, caption=(reg.get("profissional_nome") or reg.get("prof_nome") or "Profissional"), use_column_width=True)
-                    st.caption("Fonte: URL definida no cadastro ou na tabela de fotos.")
+                    st.caption("Fonte: URL do cadastro/tabela de fotos ou construída via PHOTO_URL_TEMPLATE.")
                 elif isinstance(foto_url, str) and foto_url:
+                    st.write("**Link da foto:**", foto_url)
+                else:
+                    st.info("Sem foto para esta profissional. Você pode: (1) adicionar `foto_url` no cadastro; (2) fornecer `fotos_profissionais.(csv|xlsx)` com `prof_id`/`prof_cpf`/`prof_nome` e `foto_url`; ou (3) definir `PHOTO_URL_TEMPLATE` em `secrets` (ex.: `https://cdn.exemplo.com/profissionais/{prof_id}.jpg`).")
                     st.write("**Link da foto:**", foto_url)
                 else:
                     st.info("Sem URL de foto para esta profissional. Você pode fornecer uma tabela `fotos_profissionais.(csv|xlsx)` com colunas `prof_cpf`/`prof_nome` e `foto_url`.")
