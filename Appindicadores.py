@@ -780,4 +780,247 @@ with tabs[3]:
                 fig = px.line(serie, x="dia", y="qtd", color="status_norm", markers=True, title="Atendimentos por Dia (período)")
                 st.plotly_chart(fig, use_container_width=True)
             else:
-                pivot = serie.pivot(index="dia", columns="status_norm", valu_
+                pivot = serie.pivot(index="dia", columns="status_norm", values="qtd").fillna(0).sort_index()
+                st.line_chart(pivot)
+
+        cols = st.columns(3)
+        status_norm3 = atd_f.get("status_servico").map(_norm_text) if ("status_servico" in atd_f.columns) else pd.Series(dtype=str)
+        concl = int((status_norm3 == "concluido").sum()) if not atd_f.empty else 0
+        agend = int((status_norm3 == "agendado").sum()) if not atd_f.empty else 0
+        canc  = int((status_norm3 == "cancelado").sum()) if not atd_f.empty else 0
+        total = concl + agend + canc
+        taxa_cancel = (canc / total * 100) if total > 0 else 0
+        cols[0].metric("Concluídos", f"{concl:,}".replace(",", "."))
+        cols[1].metric("Agendados", f"{agend:,}".replace(",", "."))
+        cols[2].metric("Taxa de Cancelamento", f"{taxa_cancel:.1f}%")
+
+        st.markdown("---")
+        st.dataframe(atd_f.head(200))
+
+# Financeiro (PERÍODO) — visão de caixa e aberto
+with tabs[4]:
+    st.subheader("Recebidos/A Receber & Pagos/A Pagar (período)")
+
+    receita     = float(rec_recebidos_f.get("valor_recebido", pd.Series(dtype=float)).sum()) if not rec_recebidos_f.empty else 0.0
+    a_receber   = float(rec_a_receber_f.get("valor_recebido", pd.Series(dtype=float)).sum()) if not rec_a_receber_f.empty else 0.0
+    repasses    = float(rep_pagos_f.get("valor_repasse", pd.Series(dtype=float)).sum()) if not rep_pagos_f.empty else 0.0
+    a_pagar     = float(rep_a_pagar_f.get("valor_repasse", pd.Series(dtype=float)).sum()) if not rep_a_pagar_f.empty else 0.0
+    mc_caixa    = receita - repasses
+    mc_proj     = (receita + a_receber) - (repasses + a_pagar)
+
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    c1.metric("Recebidos (caixa)", f"R$ {receita:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+    c2.metric("A Receber (aberto)", f"R$ {a_receber:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+    c3.metric("Repasses Pagos", f"R$ {repasses:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+    c4.metric("Repasses a Pagar", f"R$ {a_pagar:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+    c5.metric("MC (Caixa)", f"R$ {mc_caixa:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+    c6.metric("MC Projetada", f"R$ {mc_proj:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+
+    st.markdown("---")
+    if not fin_f.empty:
+        st.caption("Por atendimento (OS) — dentro do período")
+        show_cols = [c for c in [
+            "os_id", "valor_recebido", "valor_a_receber",
+            "valor_repasse", "valor_repasse_a_pagar",
+            "mc", "mc_projetada"
+        ] if c in fin_f.columns]
+        fin_view = fin_f.loc[:, ~fin_f.columns.duplicated()]
+        st.dataframe(fin_view[show_cols].sort_values("mc", ascending=False).reset_index(drop=True))
+
+    charts = st.columns(2)
+    if not rec_recebidos_f.empty and "valor_recebido" in rec_recebidos_f.columns and "data_pagamento" in rec_recebidos_f.columns:
+        rec_serie = rec_recebidos_f.copy()
+        rec_serie["mes"] = pd.to_datetime(rec_serie["data_pagamento"], errors="coerce").dt.to_period("M").dt.to_timestamp()
+        g = rec_serie.groupby("mes")["valor_recebido"].sum().reset_index()
+        if USE_PLOTLY:
+            charts[0].plotly_chart(px.bar(g, x="mes", y="valor_recebido", title="Recebidos por Mês (caixa)"), use_container_width=True)
+        else:
+            charts[0].bar_chart(g.set_index("mes")["valor_recebido"])
+    if not rep_pagos_f.empty and "valor_repasse" in rep_pagos_f.columns and "data_pagamento_repasse" in rep_pagos_f.columns:
+        rep_serie = rep_pagos_f.copy()
+        rep_serie["mes"] = pd.to_datetime(rep_serie["data_pagamento_repasse"], errors="coerce").dt.to_period("M").dt.to_timestamp()
+        g2 = rep_serie.groupby("mes")["valor_repasse"].sum().reset_index()
+        if USE_PLOTLY:
+            charts[1].plotly_chart(px.bar(g2, x="mes", y="valor_repasse", title="Repasses Pagos por Mês (caixa)"), use_container_width=True)
+        else:
+            charts[1].bar_chart(g2.set_index("mes")["valor_repasse"])
+
+# OS — Detalhe (PERÍODO)
+with tabs[5]:
+    st.subheader("Consulta por OS (Atendimento) — período")
+    if os_view.empty:
+        st.info("Não há dados suficientes no período selecionado.")
+    else:
+        os_view["os_id"] = os_view["os_id"].astype(str)
+        sel_os = st.selectbox("Selecione a OS", options=sorted(os_view["os_id"].dropna().unique().tolist()))
+        registro = os_view[os_view["os_id"] == str(sel_os)].copy()
+        if registro.empty:
+            st.warning("OS não encontrada na seleção.")
+        else:
+            reg = registro.iloc[0]
+            v_atend = float(reg.get("valor_atendimento", np.nan)) if not pd.isna(reg.get("valor_atendimento", np.nan)) else np.nan
+            v_rec   = float(reg.get("valor_recebido", 0) or 0)
+            v_ar    = float(reg.get("valor_a_receber", 0) or 0)
+            v_rep   = float(reg.get("valor_repasse", 0) or 0)
+            v_ap    = float(reg.get("valor_repasse_a_pagar", 0) or 0)
+            mc      = float(reg.get("mc", v_rec - v_rep))
+            mc_proj = float(reg.get("mc_projetada", (v_rec + v_ar) - (v_rep + v_ap)))
+            k1, k2, k3, k4 = st.columns(4)
+            k1.metric("Valor do Atendimento", ("R$ %0.2f" % v_atend).replace(".", ",") if not np.isnan(v_atend) else "—")
+            k2.metric("Recebidos (OS)", ("R$ %0.2f" % v_rec).replace(".", ","))
+            k3.metric("Repasses Pagos (OS)", ("R$ %0.2f" % v_rep).replace(".", ","))
+            k4.metric("MC (Caixa, OS)", ("R$ %0.2f" % mc).replace(".", ","))
+            st.caption(f"MC projetada (OS): {('R$ %0.2f' % mc_proj).replace('.', ',')}")
+            st.markdown("---")
+            c1, c2 = st.columns(2)
+            with c1:
+                st.markdown("### Cliente & Atendimento")
+                st.write({
+                    "OS": reg.get("os_id"),
+                    "Cliente": reg.get("cliente_nome"),
+                    "Data do Atendimento": (pd.to_datetime(reg.get("data_atendimento")).strftime('%d/%m/%Y') if pd.notna(reg.get("data_atendimento")) else "—"),
+                    "Status": reg.get("status_servico"),
+                    "Endereço": reg.get("endereco") or reg.get("rua"),
+                    "Bairro": reg.get("bairro"),
+                    "Cidade": reg.get("cidade"),
+                    "CEP": reg.get("cep"),
+                })
+            with c2:
+                st.markdown("### Profissional & Endereço (cadastro)")
+                st.write({
+                    "Profissional": reg.get("profissional_nome") or reg.get("prof_nome"),
+                    "CPF Profissional": reg.get("prof_cpf"),
+                    "Endereço Profissional": reg.get("prof_rua"),
+                    "Bairro Profissional": reg.get("prof_bairro"),
+                    "Cidade Profissional": reg.get("prof_cidade"),
+                    "CEP Profissional": reg.get("prof_cep"),
+                })
+
+# Atendimento + Foto (PERÍODO)
+with tabs[6]:
+    st.subheader("Atendimento + Foto")
+    if os_view.empty:
+        st.info("Não há dados suficientes no período selecionado.")
+    else:
+        os_view["os_id"] = os_view["os_id"].astype(str)
+        sel_os2 = st.selectbox("Selecione a OS (com foto)", options=sorted(os_view["os_id"].dropna().unique().tolist()), key="os_foto")
+        registro2 = os_view[os_view["os_id"] == str(sel_os2)].copy()
+        if registro2.empty:
+            st.warning("OS não encontrada na seleção.")
+        else:
+            reg = registro2.iloc[0]
+
+            # ===== Endereço completo =====
+            def _build_endereco(r):
+                if isinstance(r.get("endereco"), str) and r.get("endereco").strip():
+                    return r.get("endereco")
+                parts = []
+                if isinstance(r.get("rua"), str) and r.get("rua").strip():
+                    parts.append(r.get("rua").strip())
+                if isinstance(r.get("numero"), (str, int, float)) and str(r.get("numero")).strip():
+                    parts.append(str(r.get("numero")).strip())
+                if isinstance(r.get("complemento"), str) and r.get("complemento").strip():
+                    parts.append(str(r.get("complemento")).strip())
+                if isinstance(r.get("bairro"), str) and r.get("bairro").strip():
+                    parts.append(str(r.get("bairro")).strip())
+                if isinstance(r.get("cidade"), str) and r.get("cidade").strip():
+                    parts.append(str(r.get("cidade")).strip())
+                return " - ".join(parts) if parts else None
+
+            def _extract_city_from_endereco(end_s):
+                if not isinstance(end_s, str): return None
+                toks = [t.strip() for t in end_s.split("-") if t.strip()]
+                return toks[-1] if toks else None
+
+            endereco_full = _build_endereco(reg)
+            cidade_show = reg.get("cidade")
+            if (not isinstance(cidade_show, str) or not cidade_show.strip()) and endereco_full:
+                cidade_show = _extract_city_from_endereco(endereco_full)
+
+            # ===== Profissional pelo prof_id =====
+            prof_nome_show = reg.get("profissional_nome") or reg.get("prof_nome")
+            prof_cpf_show  = reg.get("prof_cpf")
+            if (not prof_nome_show or pd.isna(prof_nome_show) or str(prof_nome_show).strip() == "") and ("prof_id" in reg) and ("prof_id" in pro_base.columns):
+                pid = str(reg.get("prof_id"))
+                rowp = pro_base[pro_base["prof_id"].astype(str) == pid]
+                if not rowp.empty:
+                    prof_nome_show = rowp.iloc[0].get("prof_nome") or prof_nome_show
+                    prof_cpf_show  = rowp.iloc[0].get("prof_cpf") or prof_cpf_show
+
+            left, right = st.columns([2, 1])
+            with left:
+                st.markdown(f"#### OS #{reg.get('os_id','')} — {reg.get('cliente_nome','')}")
+                dt_txt = pd.to_datetime(reg.get("data_atendimento")).strftime('%d/%m/%Y') if pd.notna(reg.get("data_atendimento")) else "—"
+                st.write({
+                    "Data": dt_txt,
+                    "Status": reg.get("status_servico"),
+                    "Endereço": endereco_full or "—",
+                    "Bairro": reg.get("bairro"),
+                    "Cidade": cidade_show or "—",
+                    "CEP": reg.get("cep") or "—",
+                    "Profissional": prof_nome_show or "—",
+                    "CPF Profissional": prof_cpf_show or "—",
+                })
+                st.markdown("**Financeiro**")
+                v_rec   = float(reg.get("valor_recebido", 0) or 0)
+                v_ar    = float(reg.get("valor_a_receber", 0) or 0)
+                v_rep   = float(reg.get("valor_repasse", 0) or 0)
+                v_ap    = float(reg.get("valor_repasse_a_pagar", 0) or 0)
+                mc      = float(reg.get("mc", v_rec - v_rep))
+                mc_proj = float(reg.get("mc_projetada", (v_rec + v_ar) - (v_rep + v_ap)))
+                st.write({
+                    "Recebidos (OS)": ("R$ %0.2f" % v_rec).replace(".", ","),
+                    "A Receber (OS)": ("R$ %0.2f" % v_ar).replace(".", ","),
+                    "Repasses Pagos (OS)": ("R$ %0.2f" % v_rep).replace(".", ","),
+                    "Repasses a Pagar (OS)": ("R$ %0.2f" % v_ap).replace(".", ","),
+                    "MC (Caixa)": ("R$ %0.2f" % mc).replace(".", ","),
+                    "MC Projetada": ("R$ %0.2f" % mc_proj).replace(".", ","),
+                })
+            with right:
+                # 1) foto no registro da OS
+                foto_url = None
+                for c in ["foto_url", "foto", "imagem_url", "imagem", "url_foto", "link_foto", "photo_url", "avatar_url"]:
+                    if c in registro2.columns:
+                        val = reg.get(c)
+                        if isinstance(val, str) and val.strip():
+                            foto_url = val.strip()
+                            break
+
+                # 2) se não houver, busca no cadastro por prof_id > cpf > nome
+                if not foto_url and "foto_url" in pro_base.columns:
+                    found = False
+                    if "prof_id" in reg and not pd.isna(reg.get("prof_id")) and "prof_id" in pro_base.columns:
+                        pid = str(reg.get("prof_id"))
+                        rowp = pro_base[pro_base["prof_id"].astype(str) == pid]
+                        if not rowp.empty:
+                            foto_url = rowp.iloc[0].get("foto_url"); found = True
+                    if (not found) and ("prof_cpf" in reg) and ("prof_cpf" in pro_base.columns) and not pd.isna(reg.get("prof_cpf")):
+                        cpf_d = _only_digits(reg.get("prof_cpf"))
+                        rowp = pro_base[pro_base["prof_cpf"].astype(str).map(_only_digits) == cpf_d]
+                        if not rowp.empty:
+                            foto_url = rowp.iloc[0].get("foto_url"); found = True
+                    if (not found) and (("profissional_nome" in reg) or ("prof_nome" in reg)) and ("prof_nome" in pro_base.columns):
+                        nome = (reg.get("profissional_nome") or reg.get("prof_nome") or "")
+                        nome_n = _norm_text(nome)
+                        rowp = pro_base[pro_base["prof_nome"].astype(str).map(_norm_text) == nome_n]
+                        if not rowp.empty:
+                            foto_url = rowp.iloc[0].get("foto_url")
+
+                # 3) fallback: template
+                if not foto_url:
+                    foto_url = build_photo_from_template(
+                        prof_id=reg.get("prof_id"),
+                        prof_cpf=reg.get("prof_cpf"),
+                        os_id=reg.get("os_id"),
+                    )
+
+                if isinstance(foto_url, str) and foto_url.startswith("http"):
+                    st.image(foto_url, caption=(prof_nome_show or "Profissional"), use_column_width=True)
+                    st.caption("Fonte: cadastro/Carteirinhas.xlsx ou PHOTO_URL_TEMPLATE.")
+                elif isinstance(foto_url, str) and foto_url:
+                    st.write("**Link da foto:**", foto_url)
+                else:
+                    st.info("Sem foto para esta profissional. Garanta `prof_id` na OS e um mapeamento em Carteirinhas.xlsx (`prof_id` → `foto_url`).")
+
+st.markdown("---")
+st.caption("© Vavivê — Dashboard. Clientes/Profissionais não filtram por período; Atendimentos/Financeiro/OS sim. Financeiro segue lógica de caixa (recebidos/pagos) e aberto (a receber/a pagar).")
