@@ -16,10 +16,16 @@
 #     * A pagar    = sem data_pagamento_repasse → filtra por data_vencimento_repasse
 # - Clientes e Profissionais NÃO são sensíveis ao período.
 #
-# Fotos da profissional:
-#   1) Coluna foto_url no cadastro (se houver)
-#   2) Tabela externa "Carteirinhas.xlsx" (raiz) com colunas: prof_id/prof_cpf/prof_nome -> foto_url/imagem/imagem_url
-#   3) Template opcional em st.secrets["PHOTO_URL_TEMPLATE"], e.g. https://cdn.site/{prof_id}.jpg
+# Aba "Atendimento + Foto" (tabs[6]) — conforme solicitado:
+#   • Usa APENAS dados do atendimento (cliente_nome, data_atendimento, status_servico,
+#     endereco, bairro, cidade).
+#   • NÃO mostra CEP nem bloco financeiro.
+#   • Profissional vem da própria tabela de atendimentos:
+#       - prof_id  <= "Num Prestador" (normalizado para num_prestador)
+#       - prof_nome <= "Prestador"
+#     Se prof_cpf estiver vazio, tenta completar a partir do cadastro via prof_id.
+#   • Foto: tenta no próprio registro → depois busca no cadastro (por prof_id, prof_cpf, prof_nome)
+#           → depois monta via template PHOTO_URL_TEMPLATE ({prof_id}, {prof_cpf}, {os_id}).
 # -------------------------------------------------------------
 
 import streamlit as st
@@ -351,8 +357,12 @@ if not atd.empty:
     coalesce_inplace(atd, ["data_1", "data", "data_do_atendimento", "data_atendimento"], "data_atendimento")
     atd["data_atendimento"] = atd["data_atendimento"].apply(try_parse_date)
 
-    # PROF ID (principal chave de profissional)
-    coalesce_inplace(atd, ["id_profissional", "profissional_id", "id_prestador", "id_prof", "prof_id"], "prof_id")
+    # PROFISSIONAL: usar campos da própria planilha de atendimentos
+    #   • Num Prestador -> prof_id
+    #   • Prestador     -> prof_nome
+    coalesce_inplace(atd, ["num_prestador", "id_profissional", "profissional_id", "id_prestador", "id_prof", "prof_id"], "prof_id")
+    coalesce_inplace(atd, ["prestador", "profissional", "prof_nome", "nome_prestador"], "prof_nome")
+
     if "prof_id" in atd.columns:
         atd["prof_id"] = atd["prof_id"].astype(str)
 
@@ -363,13 +373,13 @@ if not atd.empty:
         "status_servico"
     )
 
-    # Endereço reforçado
+    # Endereço (usar apenas da própria tabela de atendimentos)
     coalesce_inplace(atd, ["endereco", "endereco_completo", "endereco_atendimento"], "endereco")
     coalesce_inplace(atd, ["rua", "logradouro", "endereco_rua", "atendimento_rua"], "rua")
     coalesce_inplace(atd, ["numero", "n", "num", "endereco_numero", "atendimento_numero"], "numero")
     coalesce_inplace(atd, ["bairro", "endereco_bairro", "atendimento_bairro"], "bairro")
     coalesce_inplace(atd, ["cidade", "municipio", "endereco_cidade", "atendimento_cidade"], "cidade")
-    coalesce_inplace(atd, ["cep", "endereco_cep", "atendimento_cep"], "cep")
+    # cep será carregado, mas NÃO usado na aba de foto
 
     atd.rename(columns={
         "cliente": "cliente_nome",
@@ -386,12 +396,9 @@ if not atd.empty:
 
 if not rec.empty:
     coalesce_inplace(rec, ["atendimento_id", "os", "os_id"], "os_id")
-
-    # prof_id se existir
-    coalesce_inplace(rec, ["prof_id", "id_profissional", "profissional_id", "id_prof"], "prof_id")
+    coalesce_inplace(rec, ["prof_id", "id_profissional", "profissional_id", "id_prof", "num_prestador"], "prof_id")
     if "prof_id" in rec.columns:
         rec["prof_id"] = rec["prof_id"].astype(str)
-
     rec.rename(columns={
         "nome": "cliente_nome",
         "valor": "valor_recebido",
@@ -414,12 +421,9 @@ if not rec.empty:
 
 if not rep.empty:
     coalesce_inplace(rep, ["atendimento_id", "os", "os_id"], "os_id")
-
-    # prof_id se existir
-    coalesce_inplace(rep, ["prof_id", "id_profissional", "profissional_id", "id_prof"], "prof_id")
+    coalesce_inplace(rep, ["prof_id", "id_profissional", "profissional_id", "id_prof", "num_prestador"], "prof_id")
     if "prof_id" in rep.columns:
         rep["prof_id"] = rep["prof_id"].astype(str)
-
     rep.rename(columns={
         "nome": "profissional_nome",
         "profissional": "profissional_nome",
@@ -479,7 +483,6 @@ else:
 rec_recebidos_f = pd.DataFrame()
 rec_a_receber_f = pd.DataFrame()
 if not rec.empty:
-    # recebidos = tem data_pagamento
     if "data_pagamento" in rec.columns:
         rec_recebidos_f = rec[rec["data_pagamento"].notna()].copy()
         rec_recebidos_f = rec_recebidos_f[
@@ -487,7 +490,6 @@ if not rec.empty:
             (pd.to_datetime(rec_recebidos_f["data_pagamento"], errors="coerce") <= dt_fim)
         ]
         rec_recebidos_f["categoria_rec"] = "recebido"
-    # a receber = sem data_pagamento -> usa vencimento
     if "data_vencimento" in rec.columns:
         rec_a_receber_f = rec[rec["data_pagamento"].isna()].copy() if "data_pagamento" in rec.columns else rec.copy()
         rec_a_receber_f = rec_a_receber_f[
@@ -502,7 +504,6 @@ rep_a_pagar_f = pd.DataFrame()
 if not rep.empty:
     base_pg = "data_pagamento_repasse"
     base_vc = "data_vencimento_repasse"
-    # pagos
     if base_pg in rep.columns:
         rep_pagos_f = rep[rep[base_pg].notna()].copy()
         rep_pagos_f = rep_pagos_f[
@@ -510,7 +511,6 @@ if not rep.empty:
             (pd.to_datetime(rep_pagos_f[base_pg], errors="coerce") <= dt_fim)
         ]
         rep_pagos_f["categoria_rep"] = "pago"
-    # a pagar
     if base_vc in rep.columns:
         rep_a_pagar_f = rep[rep[base_pg].isna()].copy() if base_pg in rep.columns else rep.copy()
         rep_a_pagar_f = rep_a_pagar_f[
@@ -555,11 +555,11 @@ fin_f["mc_projetada"] = (fin_f["valor_recebido"] + fin_f["valor_a_receber"]) - (
 # =============================================================
 # View auxiliar — OS unificada (Atend + Financeiro + Prof)
 # =============================================================
-# Atendimentos (período) -> leve também prof_id
+# Atendimentos (período) -> leve também prof_id e prof_nome (da própria planilha)
 atd_base = pd.DataFrame()
 if not atd_f.empty:
     keep_cols = [c for c in [
-        "os_id", "prof_id",
+        "os_id", "prof_id", "prof_nome",
         "cliente_nome", "data_atendimento", "valor_atendimento", "status_servico",
         "endereco", "rua", "numero", "bairro", "cidade", "cep", "complemento"
     ] if c in atd_f.columns]
@@ -632,14 +632,14 @@ if not atd_base.empty or not fin_base.empty:
         common = [c for c in ["cliente_nome"] if (c in atd_base.columns) and (c in fin_base.columns)]
         os_view = pd.merge(atd_base, fin_base, on=common, how="outer") if common else pd.concat([atd_base.reset_index(drop=True), fin_base.reset_index(drop=True)], axis=1)
 
-    # 2) Enriquecimento com Profissionais — prof_id primeiro
+    # 2) Enriquecimento com Profissionais — prof_id primeiro (apenas para completar CPF/foto)
     if not pro_base.empty:
         if ("prof_id" in os_view.columns) and ("prof_id" in pro_base.columns):
-            os_view = pd.merge(os_view, pro_base, on="prof_id", how="left", suffixes=("", "_pro"))
+            os_view = pd.merge(os_view, pro_base[["prof_id","prof_cpf","foto_url"]], on="prof_id", how="left", suffixes=("", "_pro"))
         elif ("prof_cpf" in os_view.columns) and ("prof_cpf" in pro_base.columns):
-            os_view = pd.merge(os_view, pro_base, on="prof_cpf", how="left", suffixes=("", "_pro"))
-        elif ("profissional_nome" in os_view.columns) and ("prof_nome" in pro_base.columns):
-            os_view = pd.merge(os_view, pro_base, left_on="profissional_nome", right_on="prof_nome", how="left", suffixes=("", "_pro"))
+            os_view = pd.merge(os_view, pro_base[["prof_cpf","foto_url"]], on="prof_cpf", how="left", suffixes=("", "_pro"))
+        elif ("prof_nome" in os_view.columns) and ("prof_nome" in pro_base.columns):
+            os_view = pd.merge(os_view, pro_base[["prof_nome","foto_url"]], on="prof_nome", how="left", suffixes=("", "_pro"))
 
     os_view = os_view.loc[:, ~os_view.columns.duplicated()]
 
@@ -888,7 +888,7 @@ with tabs[5]:
             with c2:
                 st.markdown("### Profissional & Endereço (cadastro)")
                 st.write({
-                    "Profissional": reg.get("profissional_nome") or reg.get("prof_nome"),
+                    "Profissional": reg.get("prof_nome"),
                     "CPF Profissional": reg.get("prof_cpf"),
                     "Endereço Profissional": reg.get("prof_rua"),
                     "Bairro Profissional": reg.get("prof_bairro"),
@@ -896,7 +896,7 @@ with tabs[5]:
                     "CEP Profissional": reg.get("prof_cep"),
                 })
 
-# Atendimento + Foto (PERÍODO)
+# Atendimento + Foto (PERÍODO) — APENAS dados do atendimento (sem CEP e sem Financeiro)
 with tabs[6]:
     st.subheader("Atendimento + Foto")
     if os_view.empty:
@@ -910,72 +910,45 @@ with tabs[6]:
         else:
             reg = registro2.iloc[0]
 
-            # ===== Endereço completo =====
-            def _build_endereco(r):
-                if isinstance(r.get("endereco"), str) and r.get("endereco").strip():
-                    return r.get("endereco")
-                parts = []
-                if isinstance(r.get("rua"), str) and r.get("rua").strip():
-                    parts.append(r.get("rua").strip())
-                if isinstance(r.get("numero"), (str, int, float)) and str(r.get("numero")).strip():
-                    parts.append(str(r.get("numero")).strip())
-                if isinstance(r.get("complemento"), str) and r.get("complemento").strip():
-                    parts.append(str(r.get("complemento")).strip())
-                if isinstance(r.get("bairro"), str) and r.get("bairro").strip():
-                    parts.append(str(r.get("bairro")).strip())
-                if isinstance(r.get("cidade"), str) and r.get("cidade").strip():
-                    parts.append(str(r.get("cidade")).strip())
-                return " - ".join(parts) if parts else None
+            # ----- Dados do atendimento (da própria tabela) -----
+            cliente_nome = reg.get("cliente_nome")
+            dt_txt = pd.to_datetime(reg.get("data_atendimento")).strftime('%d/%m/%Y') if pd.notna(reg.get("data_atendimento")) else "—"
+            status = reg.get("status_servico")
+            endereco = reg.get("endereco") or reg.get("rua")
+            bairro = reg.get("bairro")
+            cidade = reg.get("cidade")
 
-            def _extract_city_from_endereco(end_s):
-                if not isinstance(end_s, str): return None
-                toks = [t.strip() for t in end_s.split("-") if t.strip()]
-                return toks[-1] if toks else None
-
-            endereco_full = _build_endereco(reg)
-            cidade_show = reg.get("cidade")
-            if (not isinstance(cidade_show, str) or not cidade_show.strip()) and endereco_full:
-                cidade_show = _extract_city_from_endereco(endereco_full)
-
-            # ===== Profissional pelo prof_id =====
-            prof_nome_show = reg.get("profissional_nome") or reg.get("prof_nome")
-            prof_cpf_show  = reg.get("prof_cpf")
-            if (not prof_nome_show or pd.isna(prof_nome_show) or str(prof_nome_show).strip() == "") and ("prof_id" in reg) and ("prof_id" in pro_base.columns):
-                pid = str(reg.get("prof_id"))
-                rowp = pro_base[pro_base["prof_id"].astype(str) == pid]
-                if not rowp.empty:
-                    prof_nome_show = rowp.iloc[0].get("prof_nome") or prof_nome_show
-                    prof_cpf_show  = rowp.iloc[0].get("prof_cpf") or prof_cpf_show
+            # ----- Profissional da própria tabela de atendimentos -----
+            # prof_id: de "Num Prestador" (normalizado para num_prestador) já mapeado em atd -> prof_id
+            prof_id_show = reg.get("prof_id")
+            # nome: de "Prestador" já mapeado para prof_nome
+            prof_nome_show = reg.get("prof_nome")
+            # CPF: se vier vazio, tenta completar via cadastro por prof_id
+            prof_cpf_show = reg.get("prof_cpf")
+            if (not isinstance(prof_cpf_show, str) or not prof_cpf_show.strip()) and isinstance(prof_id_show, (str,int,float)):
+                pid = str(prof_id_show)
+                if not pro_base.empty and "prof_id" in pro_base.columns:
+                    rowp = pro_base[pro_base["prof_id"].astype(str) == pid]
+                    if not rowp.empty:
+                        prof_cpf_show = rowp.iloc[0].get("prof_cpf") or prof_cpf_show
+                        # Se nome do atendimento estiver vazio, pode preencher do cadastro
+                        if not prof_nome_show or str(prof_nome_show).strip() == "":
+                            prof_nome_show = rowp.iloc[0].get("prof_nome") or prof_nome_show
 
             left, right = st.columns([2, 1])
             with left:
-                st.markdown(f"#### OS #{reg.get('os_id','')} — {reg.get('cliente_nome','')}")
-                dt_txt = pd.to_datetime(reg.get("data_atendimento")).strftime('%d/%m/%Y') if pd.notna(reg.get("data_atendimento")) else "—"
+                st.markdown(f"#### OS #{reg.get('os_id','')} — {cliente_nome or ''}")
                 st.write({
                     "Data": dt_txt,
-                    "Status": reg.get("status_servico"),
-                    "Endereço": endereco_full or "—",
-                    "Bairro": reg.get("bairro"),
-                    "Cidade": cidade_show or "—",
-                    "CEP": reg.get("cep") or "—",
+                    "Status": status,
+                    "Endereço": endereco or "—",
+                    "Bairro": bairro or "—",
+                    "Cidade": cidade or "—",
                     "Profissional": prof_nome_show or "—",
+                    "ID Profissional": str(prof_id_show) if pd.notna(prof_id_show) else "—",
                     "CPF Profissional": prof_cpf_show or "—",
                 })
-                st.markdown("**Financeiro**")
-                v_rec   = float(reg.get("valor_recebido", 0) or 0)
-                v_ar    = float(reg.get("valor_a_receber", 0) or 0)
-                v_rep   = float(reg.get("valor_repasse", 0) or 0)
-                v_ap    = float(reg.get("valor_repasse_a_pagar", 0) or 0)
-                mc      = float(reg.get("mc", v_rec - v_rep))
-                mc_proj = float(reg.get("mc_projetada", (v_rec + v_ar) - (v_rep + v_ap)))
-                st.write({
-                    "Recebidos (OS)": ("R$ %0.2f" % v_rec).replace(".", ","),
-                    "A Receber (OS)": ("R$ %0.2f" % v_ar).replace(".", ","),
-                    "Repasses Pagos (OS)": ("R$ %0.2f" % v_rep).replace(".", ","),
-                    "Repasses a Pagar (OS)": ("R$ %0.2f" % v_ap).replace(".", ","),
-                    "MC (Caixa)": ("R$ %0.2f" % mc).replace(".", ","),
-                    "MC Projetada": ("R$ %0.2f" % mc_proj).replace(".", ","),
-                })
+
             with right:
                 # 1) foto no registro da OS
                 foto_url = None
@@ -987,21 +960,20 @@ with tabs[6]:
                             break
 
                 # 2) se não houver, busca no cadastro por prof_id > cpf > nome
-                if not foto_url and "foto_url" in pro_base.columns:
+                if not foto_url and not pro_base.empty:
                     found = False
-                    if "prof_id" in reg and not pd.isna(reg.get("prof_id")) and "prof_id" in pro_base.columns:
-                        pid = str(reg.get("prof_id"))
+                    if isinstance(prof_id_show, (str,int,float)) and "prof_id" in pro_base.columns:
+                        pid = str(prof_id_show)
                         rowp = pro_base[pro_base["prof_id"].astype(str) == pid]
                         if not rowp.empty:
                             foto_url = rowp.iloc[0].get("foto_url"); found = True
-                    if (not found) and ("prof_cpf" in reg) and ("prof_cpf" in pro_base.columns) and not pd.isna(reg.get("prof_cpf")):
-                        cpf_d = _only_digits(reg.get("prof_cpf"))
+                    if (not found) and isinstance(prof_cpf_show, str) and "prof_cpf" in pro_base.columns and prof_cpf_show.strip():
+                        cpf_d = _only_digits(prof_cpf_show)
                         rowp = pro_base[pro_base["prof_cpf"].astype(str).map(_only_digits) == cpf_d]
                         if not rowp.empty:
                             foto_url = rowp.iloc[0].get("foto_url"); found = True
-                    if (not found) and (("profissional_nome" in reg) or ("prof_nome" in reg)) and ("prof_nome" in pro_base.columns):
-                        nome = (reg.get("profissional_nome") or reg.get("prof_nome") or "")
-                        nome_n = _norm_text(nome)
+                    if (not found) and isinstance(prof_nome_show, str) and "prof_nome" in pro_base.columns and prof_nome_show.strip():
+                        nome_n = _norm_text(prof_nome_show)
                         rowp = pro_base[pro_base["prof_nome"].astype(str).map(_norm_text) == nome_n]
                         if not rowp.empty:
                             foto_url = rowp.iloc[0].get("foto_url")
@@ -1009,18 +981,18 @@ with tabs[6]:
                 # 3) fallback: template
                 if not foto_url:
                     foto_url = build_photo_from_template(
-                        prof_id=reg.get("prof_id"),
-                        prof_cpf=reg.get("prof_cpf"),
+                        prof_id=prof_id_show,
+                        prof_cpf=prof_cpf_show,
                         os_id=reg.get("os_id"),
                     )
 
                 if isinstance(foto_url, str) and foto_url.startswith("http"):
                     st.image(foto_url, caption=(prof_nome_show or "Profissional"), use_column_width=True)
-                    st.caption("Fonte: cadastro/Carteirinhas.xlsx ou PHOTO_URL_TEMPLATE.")
+                    st.caption("Fonte: Atendimentos / cadastro (Profissionais) / Carteirinhas.xlsx ou PHOTO_URL_TEMPLATE.")
                 elif isinstance(foto_url, str) and foto_url:
                     st.write("**Link da foto:**", foto_url)
                 else:
                     st.info("Sem foto para esta profissional. Garanta `prof_id` na OS e um mapeamento em Carteirinhas.xlsx (`prof_id` → `foto_url`).")
 
 st.markdown("---")
-st.caption("© Vavivê — Dashboard. Clientes/Profissionais não filtram por período; Atendimentos/Financeiro/OS sim. Financeiro segue lógica de caixa (recebidos/pagos) e aberto (a receber/a pagar).")
+st.caption("© Vavivê — Dashboard. Clientes/Profissionais não filtram por período; Atendimentos/Financeiro/OS sim. Aba 'Atendimento + Foto' usa apenas dados do atendimento e foto da profissional.")
