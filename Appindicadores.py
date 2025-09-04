@@ -635,31 +635,39 @@ def merge_profissionais_sem_erros(os_view: pd.DataFrame, pro_base: pd.DataFrame)
     # 1) Merge por prof_id, se existir em ambos
     if ("prof_id" in out.columns) and ("prof_id" in pro_base.columns):
         cols_take = safe_cols(pro_base, ["prof_id", "prof_cpf", "foto_url"])
-        out = out.merge(pro_base[cols_take], on="prof_id", how="left", suffixes=("", "_pro"))
+        if cols_take:
+            out = out.merge(pro_base[cols_take], on="prof_id", how="left", suffixes=("", "_pro"))
 
     # 2) Merge por prof_cpf (somente se ainda faltar foto_url e houver cpf em ambos)
-    if ("foto_url" not in out.columns or out["foto_url"].isna().all()) and ("prof_cpf" in out.columns) and ("prof_cpf" in pro_base.columns):
-        tmp = pro_base[safe_cols(pro_base, ["prof_cpf", "foto_url"])].copy()
-        if not tmp.empty:
-            tmp["prof_cpf"] = tmp["prof_cpf"].astype(str).map(_only_digits)
-            out["prof_cpf"] = out["prof_cpf"].astype(str).map(_only_digits)
-            out = out.merge(tmp, on="prof_cpf", how="left", suffixes=("", "_pro2"))
-            if "foto_url_pro2" in out.columns and "foto_url" in out.columns:
-                out["foto_url"] = out["foto_url"].fillna(out["foto_url_pro2"])
-                out.drop(columns=[c for c in ["foto_url_pro2"] if c in out.columns], inplace=True)
+    if (("foto_url" not in out.columns) or out["foto_url"].isna().all()) and ("prof_cpf" in out.columns) and ("prof_cpf" in pro_base.columns):
+        cols_take = safe_cols(pro_base, ["prof_cpf", "foto_url"])
+        if cols_take and ("foto_url" in cols_take):
+            tmp = pro_base[cols_take].copy()
+            if not tmp.empty:
+                tmp["prof_cpf"] = tmp["prof_cpf"].astype(str).map(_only_digits)
+                out["prof_cpf"] = out["prof_cpf"].astype(str).map(_only_digits)
+                out = out.merge(tmp, on="prof_cpf", how="left", suffixes=("", "_pro2"))
+                if "foto_url_pro2" in out.columns and "foto_url" in out.columns:
+                    out["foto_url"] = out["foto_url"].fillna(out["foto_url_pro2"])
+                    out.drop(columns=[c for c in ["foto_url_pro2"] if c in out.columns], inplace=True)
 
-    # 3) Merge por nome (normalizado) se ainda sem foto
-    if ("foto_url" not in out.columns or out["foto_url"].isna().all()) and ("prof_nome" in out.columns) and ("prof_nome" in pro_base.columns):
+    # 3) Merge por nome (normalizado) — apenas se ambos prof_nome e foto_url existirem em pro_base
+    need_name_merge = ("foto_url" not in out.columns) or out["foto_url"].isna().all()
+    if need_name_merge and ("prof_nome" in out.columns) and ("prof_nome" in pro_base.columns) and ("foto_url" in pro_base.columns):
         tmp = pro_base[safe_cols(pro_base, ["prof_nome", "foto_url"])].copy()
-        if not tmp.empty:
+        if not tmp.empty and ("prof_nome" in tmp.columns) and ("foto_url" in tmp.columns):
             tmp["__nome_norm"] = tmp["prof_nome"].astype(str).map(_norm_text)
             out["__nome_norm"] = out["prof_nome"].astype(str).map(_norm_text)
-            out = out.merge(tmp[["__nome_norm", "foto_url"]].rename(columns={"foto_url": "foto_url_pro3"}), on="__nome_norm", how="left")
-            if "foto_url_pro3" in out.columns:
-                if "foto_url" not in out.columns:
-                    out["foto_url"] = out["foto_url_pro3"]
-                else:
-                    out["foto_url"] = out["foto_url"].fillna(out["foto_url_pro3"])
+            # só faz o slice se ambas as colunas existem
+            cols_final = safe_cols(tmp, ["__nome_norm", "foto_url"])
+            if set(["__nome_norm", "foto_url"]).issubset(set(cols_final)):
+                tmp_final = tmp[cols_final].rename(columns={"foto_url": "foto_url_pro3"})
+                out = out.merge(tmp_final, on="__nome_norm", how="left")
+                if "foto_url_pro3" in out.columns:
+                    if "foto_url" not in out.columns:
+                        out["foto_url"] = out["foto_url_pro3"]
+                    else:
+                        out["foto_url"] = out["foto_url"].fillna(out["foto_url_pro3"])
                 out.drop(columns=["__nome_norm", "foto_url_pro3"], inplace=True, errors="ignore")
 
     return out
