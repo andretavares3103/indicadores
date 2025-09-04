@@ -18,7 +18,7 @@
 #
 # Aba "Atendimento + Foto" (tabs[6]) — conforme solicitado:
 #   • Usa APENAS dados do atendimento (cliente_nome, data_atendimento, status_servico,
-#     endereco, bairro, cidade).
+#     endereco, bairro, cidade, prof_nome e prof_id da própria planilha).
 #   • NÃO mostra CEP nem bloco financeiro.
 #   • Profissional vem da própria tabela de atendimentos:
 #       - prof_id  <= "Num Prestador" (normalizado para num_prestador)
@@ -100,6 +100,10 @@ def coalesce_inplace(df: pd.DataFrame, candidates: list[str], new: str) -> pd.Da
         df[new] = np.nan
     return df
 
+def safe_cols(df: pd.DataFrame, cols: list[str]) -> list[str]:
+    """Retorna apenas colunas existentes em df, na ordem pedida."""
+    return [c for c in cols if c in df.columns]
+
 # =============================================================
 # Fotos — mapeamento e template
 # =============================================================
@@ -170,7 +174,7 @@ def load_photo_map() -> pd.DataFrame:
                          "photo", "photo_url", "avatar", "avatar_url"}:
                     ren[c] = "foto_url"
             df = df.rename(columns=ren)
-            keep = [c for c in ["prof_id", "prof_cpf", "prof_nome", "foto_url"] if c in df.columns]
+            keep = safe_cols(df, ["prof_id", "prof_cpf", "prof_nome", "foto_url"])
             if "foto_url" not in keep:
                 continue
             df = df[keep].copy()
@@ -341,6 +345,7 @@ if not pro.empty:
     coalesce_inplace(pro, ["endereco_1_bairro", "endereco_bairro", "bairro"], "prof_bairro")
     coalesce_inplace(pro, ["endereco_1_cidade", "cidade"], "prof_cidade")
     coalesce_inplace(pro, ["endereco_1_cep", "cep"], "prof_cep")
+    # Captura/normaliza coluna de foto no cadastro se existir
     if "foto_url" not in pro.columns:
         for c in PHOTO_COLS:
             if c in pro.columns:
@@ -379,7 +384,7 @@ if not atd.empty:
     coalesce_inplace(atd, ["numero", "n", "num", "endereco_numero", "atendimento_numero"], "numero")
     coalesce_inplace(atd, ["bairro", "endereco_bairro", "atendimento_bairro"], "bairro")
     coalesce_inplace(atd, ["cidade", "municipio", "endereco_cidade", "atendimento_cidade"], "cidade")
-    # cep será carregado, mas NÃO usado na aba de foto
+    # CEP é carregado mas não será mostrado na aba de Foto
 
     atd.rename(columns={
         "cliente": "cliente_nome",
@@ -575,9 +580,9 @@ if not fin_f.empty:
 # Profissionais (cadastro completo) — preferir unicidade por prof_id
 pro_base = pd.DataFrame()
 if not pro.empty:
-    cols_pro = [c for c in ["prof_id", "prof_cpf", "prof_nome",
-                            "prof_rua", "prof_bairro", "prof_cidade", "prof_cep",
-                            "foto_url"] if c in pro.columns]
+    cols_pro = safe_cols(pro, ["prof_id", "prof_cpf", "prof_nome",
+                               "prof_rua", "prof_bairro", "prof_cidade", "prof_cep",
+                               "foto_url"])
     if "prof_id" in pro.columns:
         pro_base = pro[cols_pro].drop_duplicates(subset=["prof_id"])
         pro_base["prof_id"] = pro_base["prof_id"].astype(str)
@@ -591,22 +596,24 @@ photo_map_df = load_photo_map()
 if not pro_base.empty and not photo_map_df.empty:
     # por prof_id primeiro
     if "prof_id" in pro_base.columns and "prof_id" in photo_map_df.columns:
-        tmp_id = photo_map_df[["prof_id", "foto_url"]].dropna().copy()
-        tmp_id["prof_id"] = tmp_id["prof_id"].astype(str)
+        tmp_id = photo_map_df[safe_cols(photo_map_df, ["prof_id", "foto_url"])].dropna(subset=["foto_url"]).copy()
+        if "prof_id" in tmp_id.columns:
+            tmp_id["prof_id"] = tmp_id["prof_id"].astype(str)
         pro_base = pro_base.merge(tmp_id.rename(columns={"foto_url": "foto_url_map_id"}), on="prof_id", how="left")
     # cpf
     if "prof_cpf" in pro_base.columns and "prof_cpf" in photo_map_df.columns:
-        tmp = photo_map_df[["prof_cpf", "foto_url"]].dropna().copy()
-        tmp["prof_cpf"] = tmp["prof_cpf"].astype(str).map(_only_digits)
-        if "prof_cpf" in pro_base.columns:
+        tmp = photo_map_df[safe_cols(photo_map_df, ["prof_cpf", "foto_url"])].dropna(subset=["foto_url"]).copy()
+        if "prof_cpf" in tmp.columns:
+            tmp["prof_cpf"] = tmp["prof_cpf"].astype(str).map(_only_digits)
             pro_base["prof_cpf"] = pro_base["prof_cpf"].astype(str).map(_only_digits)
         pro_base = pro_base.merge(tmp.rename(columns={"foto_url": "foto_url_map"}), on="prof_cpf", how="left")
     # nome
     if "prof_nome" in pro_base.columns and "prof_nome" in photo_map_df.columns:
-        tmp2 = photo_map_df[["prof_nome", "foto_url"]].dropna().copy()
-        tmp2["__nome_norm"] = tmp2["prof_nome"].astype(str).map(_norm_text)
-        pro_base["__nome_norm"] = pro_base["prof_nome"].astype(str).map(_norm_text)
-        pro_base = pro_base.merge(tmp2[["__nome_norm", "foto_url"]].rename(columns={"foto_url": "foto_url_map_nome"}), on="__nome_norm", how="left")
+        tmp2 = photo_map_df[safe_cols(photo_map_df, ["prof_nome", "foto_url"])].dropna(subset=["foto_url"]).copy()
+        if not tmp2.empty:
+            tmp2["__nome_norm"] = tmp2["prof_nome"].astype(str).map(_norm_text)
+            pro_base["__nome_norm"] = pro_base["prof_nome"].astype(str).map(_norm_text)
+            pro_base = pro_base.merge(tmp2[["__nome_norm", "foto_url"]].rename(columns={"foto_url": "foto_url_map_nome"}), on="__nome_norm", how="left")
 
     if "foto_url" not in pro_base.columns:
         pro_base["foto_url"] = np.nan
@@ -619,7 +626,45 @@ if not pro_base.empty and not photo_map_df.empty:
     for c in ["__nome_norm", "foto_url_map_id", "foto_url_map", "foto_url_map_nome"]:
         if c in pro_base.columns: pro_base.drop(columns=[c], inplace=True)
 
-# ====== Merge ======
+def merge_profissionais_sem_erros(os_view: pd.DataFrame, pro_base: pd.DataFrame) -> pd.DataFrame:
+    """Tenta enriquecer os_view com colunas de pro_base sem causar KeyError."""
+    if os_view.empty or pro_base.empty:
+        return os_view
+    out = os_view.copy()
+
+    # 1) Merge por prof_id, se existir em ambos
+    if ("prof_id" in out.columns) and ("prof_id" in pro_base.columns):
+        cols_take = safe_cols(pro_base, ["prof_id", "prof_cpf", "foto_url"])
+        out = out.merge(pro_base[cols_take], on="prof_id", how="left", suffixes=("", "_pro"))
+
+    # 2) Merge por prof_cpf (somente se ainda faltar foto_url e houver cpf em ambos)
+    if ("foto_url" not in out.columns or out["foto_url"].isna().all()) and ("prof_cpf" in out.columns) and ("prof_cpf" in pro_base.columns):
+        tmp = pro_base[safe_cols(pro_base, ["prof_cpf", "foto_url"])].copy()
+        if not tmp.empty:
+            tmp["prof_cpf"] = tmp["prof_cpf"].astype(str).map(_only_digits)
+            out["prof_cpf"] = out["prof_cpf"].astype(str).map(_only_digits)
+            out = out.merge(tmp, on="prof_cpf", how="left", suffixes=("", "_pro2"))
+            if "foto_url_pro2" in out.columns and "foto_url" in out.columns:
+                out["foto_url"] = out["foto_url"].fillna(out["foto_url_pro2"])
+                out.drop(columns=[c for c in ["foto_url_pro2"] if c in out.columns], inplace=True)
+
+    # 3) Merge por nome (normalizado) se ainda sem foto
+    if ("foto_url" not in out.columns or out["foto_url"].isna().all()) and ("prof_nome" in out.columns) and ("prof_nome" in pro_base.columns):
+        tmp = pro_base[safe_cols(pro_base, ["prof_nome", "foto_url"])].copy()
+        if not tmp.empty:
+            tmp["__nome_norm"] = tmp["prof_nome"].astype(str).map(_norm_text)
+            out["__nome_norm"] = out["prof_nome"].astype(str).map(_norm_text)
+            out = out.merge(tmp[["__nome_norm", "foto_url"]].rename(columns={"foto_url": "foto_url_pro3"}), on="__nome_norm", how="left")
+            if "foto_url_pro3" in out.columns:
+                if "foto_url" not in out.columns:
+                    out["foto_url"] = out["foto_url_pro3"]
+                else:
+                    out["foto_url"] = out["foto_url"].fillna(out["foto_url_pro3"])
+                out.drop(columns=["__nome_norm", "foto_url_pro3"], inplace=True, errors="ignore")
+
+    return out
+
+# ====== Merge principal OS ======
 os_view = pd.DataFrame()
 if not atd_base.empty or not fin_base.empty:
     if "os_id" in atd_base.columns: atd_base["os_id"] = atd_base["os_id"].astype(str)
@@ -632,14 +677,8 @@ if not atd_base.empty or not fin_base.empty:
         common = [c for c in ["cliente_nome"] if (c in atd_base.columns) and (c in fin_base.columns)]
         os_view = pd.merge(atd_base, fin_base, on=common, how="outer") if common else pd.concat([atd_base.reset_index(drop=True), fin_base.reset_index(drop=True)], axis=1)
 
-    # 2) Enriquecimento com Profissionais — prof_id primeiro (apenas para completar CPF/foto)
-    if not pro_base.empty:
-        if ("prof_id" in os_view.columns) and ("prof_id" in pro_base.columns):
-            os_view = pd.merge(os_view, pro_base[["prof_id","prof_cpf","foto_url"]], on="prof_id", how="left", suffixes=("", "_pro"))
-        elif ("prof_cpf" in os_view.columns) and ("prof_cpf" in pro_base.columns):
-            os_view = pd.merge(os_view, pro_base[["prof_cpf","foto_url"]], on="prof_cpf", how="left", suffixes=("", "_pro"))
-        elif ("prof_nome" in os_view.columns) and ("prof_nome" in pro_base.columns):
-            os_view = pd.merge(os_view, pro_base[["prof_nome","foto_url"]], on="prof_nome", how="left", suffixes=("", "_pro"))
+    # 2) Enriquecimento com Profissionais — usando função tolerante
+    os_view = merge_profissionais_sem_erros(os_view, pro_base)
 
     os_view = os_view.loc[:, ~os_view.columns.duplicated()]
 
@@ -919,11 +958,8 @@ with tabs[6]:
             cidade = reg.get("cidade")
 
             # ----- Profissional da própria tabela de atendimentos -----
-            # prof_id: de "Num Prestador" (normalizado para num_prestador) já mapeado em atd -> prof_id
-            prof_id_show = reg.get("prof_id")
-            # nome: de "Prestador" já mapeado para prof_nome
-            prof_nome_show = reg.get("prof_nome")
-            # CPF: se vier vazio, tenta completar via cadastro por prof_id
+            prof_id_show = reg.get("prof_id")      # Num Prestador normalizado
+            prof_nome_show = reg.get("prof_nome")  # Prestador
             prof_cpf_show = reg.get("prof_cpf")
             if (not isinstance(prof_cpf_show, str) or not prof_cpf_show.strip()) and isinstance(prof_id_show, (str,int,float)):
                 pid = str(prof_id_show)
@@ -931,7 +967,6 @@ with tabs[6]:
                     rowp = pro_base[pro_base["prof_id"].astype(str) == pid]
                     if not rowp.empty:
                         prof_cpf_show = rowp.iloc[0].get("prof_cpf") or prof_cpf_show
-                        # Se nome do atendimento estiver vazio, pode preencher do cadastro
                         if not prof_nome_show or str(prof_nome_show).strip() == "":
                             prof_nome_show = rowp.iloc[0].get("prof_nome") or prof_nome_show
 
