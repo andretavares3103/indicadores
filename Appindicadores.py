@@ -401,7 +401,7 @@ if not atd.empty:
     atd["data_atendimento"] = atd["data_atendimento"].apply(lambda v: try_parse_date(v, prefer=PREFER_DATE_ORDER))
 
     # PROFISSIONAL: usar campos da própria planilha de atendimentos
-    coalesce_inplace(atd, ["num_prestador", "id_profissional", "profissional_id", "id_prestador", "id_prof", "prof_id"], "prof_id")
+    coalesce_inplace(atd, ["#num_prestador","num_prestador", "id_profissional", "profissional_id", "id_prestador", "id_prof", "prof_id"], "prof_id")
     coalesce_inplace(atd, ["prestador", "profissional", "prof_nome", "nome_prestador"], "prof_nome")
 
     if "prof_id" in atd.columns:
@@ -1074,3 +1074,4 @@ with tabs[6]:
 
 st.markdown("---")
 st.caption("© Vavivê — Dashboard. Clientes/Profissionais não filtram por período; Atendimentos/Financeiro/OS sim. Aba 'Atendimento + Foto' usa apenas dados do atendimento e foto da profissional.")
+
