@@ -32,6 +32,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import unicodedata
+import re
 from datetime import datetime, date
 from pathlib import Path
 
@@ -78,18 +79,54 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     df.columns = [_slug(c) for c in df.columns]
     return df
 
-def try_parse_date(x):
-    """Converte string, datetime ou serial Excel -> Timestamp."""
+# ===== Novo parser de datas: dmy/mdy/auto =====
+PREFER_DATE_ORDER = (st.secrets.get("RAW_DATE_FORMAT", "dmy") or "dmy").lower()  # "dmy" | "mdy" | "auto"
+
+def try_parse_date(x, prefer: str | None = None):
+    """
+    Converte string, datetime ou serial Excel -> Timestamp.
+    Suporta formatos dmy/mdy e tenta 'auto' para CSV/planilhas mistas.
+    prefer: "dmy" (pt-BR), "mdy" (US) ou "auto". Default vem de st.secrets.
+    """
+    prefer = (prefer or PREFER_DATE_ORDER or "dmy").lower()
     if pd.isna(x):
         return pd.NaT
     if isinstance(x, (pd.Timestamp, datetime, date)):
-        return pd.to_datetime(x)
+        return pd.to_datetime(x, errors="coerce")
+
+    # Serial Excel
     if isinstance(x, (int, float)) and not np.isnan(x):
-        # Serial Excel (dias desde 1899-12-30)
-        if 59 < float(x) < 80000:
+        if 59 < float(x) < 80000:  # range plausível de serial Excel
             base = pd.Timestamp("1899-12-30")
             return base + pd.to_timedelta(float(x), unit="D")
-    return pd.to_datetime(str(x), dayfirst=True, errors="coerce")
+
+    s = str(x).strip()
+    if not s:
+        return pd.NaT
+
+    # ISO (yyyy-mm-dd) claro
+    if re.match(r"^\d{4}-\d{2}-\d{2}$", s):
+        return pd.to_datetime(s, errors="coerce")
+
+    # dd/mm/yyyy ou mm/dd/yyyy (ambíguo)
+    amb = re.match(r"^(\d{1,2})/(\d{1,2})/(\d{4})$", s)
+    if amb:
+        d1, d2, y = int(amb.group(1)), int(amb.group(2)), int(amb.group(3))
+        if prefer == "mdy":
+            return pd.to_datetime(s, dayfirst=False, errors="coerce")
+        if prefer == "dmy":
+            return pd.to_datetime(s, dayfirst=True, errors="coerce")
+        # auto: heurística simples
+        # se d1 > 12 => claramente dmy; se d2 > 12 => claramente mdy;
+        # se ambos <= 12, padrão BR (dmy)
+        if d1 > 12:
+            return pd.to_datetime(s, dayfirst=True, errors="coerce")
+        if d2 > 12:
+            return pd.to_datetime(s, dayfirst=False, errors="coerce")
+        return pd.to_datetime(s, dayfirst=True, errors="coerce")
+
+    # fallback geral: respeita prefer
+    return pd.to_datetime(s, dayfirst=(prefer != "mdy"), errors="coerce")
 
 def coalesce_inplace(df: pd.DataFrame, candidates: list[str], new: str) -> pd.DataFrame:
     for c in candidates:
@@ -143,7 +180,7 @@ def load_photo_map() -> pd.DataFrame:
       - URL:   foto_url / imagem / imagem_url / url / url_foto / link / link_foto / photo / photo_url / avatar / avatar_url
     """
     candidates = [
-        Path("./Carteirinhas.xlsx"),                    # planilha informada
+        Path("./Carteirinhas.xlsx"),
         Path("./fotos_profissionais.csv"),
         Path("./profissionais_fotos.csv"),
         Path("./fotos.csv"),
@@ -360,11 +397,10 @@ if not atd.empty:
 
     # Data do atendimento (usa "Data 1" da aba "Clientes")
     coalesce_inplace(atd, ["data_1", "data", "data_do_atendimento", "data_atendimento"], "data_atendimento")
-    atd["data_atendimento"] = atd["data_atendimento"].apply(try_parse_date)
+    # >>> usar parser esperto; pode forçar por secrets RAW_DATE_FORMAT ("dmy"|"mdy"|"auto")
+    atd["data_atendimento"] = atd["data_atendimento"].apply(lambda v: try_parse_date(v, prefer=PREFER_DATE_ORDER))
 
     # PROFISSIONAL: usar campos da própria planilha de atendimentos
-    #   • Num Prestador -> prof_id
-    #   • Prestador     -> prof_nome
     coalesce_inplace(atd, ["num_prestador", "id_profissional", "profissional_id", "id_prestador", "id_prof", "prof_id"], "prof_id")
     coalesce_inplace(atd, ["prestador", "profissional", "prof_nome", "nome_prestador"], "prof_nome")
 
@@ -418,10 +454,11 @@ if not rec.empty:
         rec["situacao"] = rec["situacao"].fillna(rec["status"]);  rec.drop(columns=["status"], inplace=True)
     elif "situacao" not in rec.columns and "status" in rec.columns:
         rec.rename(columns={"status": "situacao"}, inplace=True)
+    # >>> parser esperto (pagamento e vencimento)
     if "data_pagamento" in rec.columns:
-        rec["data_pagamento"] = rec["data_pagamento"].apply(try_parse_date)
+        rec["data_pagamento"] = rec["data_pagamento"].apply(lambda v: try_parse_date(v, prefer=PREFER_DATE_ORDER))
     if "data_vencimento" in rec.columns:
-        rec["data_vencimento"] = rec["data_vencimento"].apply(try_parse_date)
+        rec["data_vencimento"] = rec["data_vencimento"].apply(lambda v: try_parse_date(v, prefer=PREFER_DATE_ORDER))
     rec = rec.loc[:, ~rec.columns.duplicated()]
 
 if not rep.empty:
@@ -446,8 +483,10 @@ if not rep.empty:
     else:
         for _c in ["situacao", "status"]:
             if _c in rep.columns: rep.drop(columns=[_c], inplace=True)
+    # >>> parser esperto (datas de repasse)
     for dtc in ["data_pagamento_repasse", "data_vencimento_repasse"]:
-        if dtc in rep.columns: rep[dtc] = rep[dtc].apply(try_parse_date)
+        if dtc in rep.columns:
+            rep[dtc] = rep[dtc].apply(lambda v: try_parse_date(v, prefer=PREFER_DATE_ORDER))
     rep = rep.loc[:, ~rep.columns.duplicated()]
 
 # =============================================================
@@ -475,12 +514,14 @@ else:
 st.markdown("## 🗓️ Período")
 sel_ini, sel_fim = st.date_input("Selecione o intervalo", value=(dmin, dmax))
 dt_ini = pd.to_datetime(sel_ini)
-dt_fim = pd.to_datetime(sel_fim)
+# >>> limite superior EXCLUSIVO: inclui o dia final completo
+dt_fim_excl = pd.to_datetime(sel_fim) + pd.Timedelta(days=1)
 
 # ------- aplica filtro nas tabelas sensíveis ao período -------
 # ATENDIMENTOS: usa Data 1 -> data_atendimento
 if not atd.empty and "data_atendimento" in atd.columns:
-    atd_f = atd[(atd["data_atendimento"] >= dt_ini) & (atd["data_atendimento"] <= dt_fim)].copy()
+    atd["data_atendimento"] = pd.to_datetime(atd["data_atendimento"], errors="coerce")
+    atd_f = atd[(atd["data_atendimento"] >= dt_ini) & (atd["data_atendimento"] < dt_fim_excl)].copy()
 else:
     atd_f = atd.copy()
 
@@ -489,39 +530,34 @@ rec_recebidos_f = pd.DataFrame()
 rec_a_receber_f = pd.DataFrame()
 if not rec.empty:
     if "data_pagamento" in rec.columns:
-        rec_recebidos_f = rec[rec["data_pagamento"].notna()].copy()
-        rec_recebidos_f = rec_recebidos_f[
-            (pd.to_datetime(rec_recebidos_f["data_pagamento"], errors="coerce") >= dt_ini) &
-            (pd.to_datetime(rec_recebidos_f["data_pagamento"], errors="coerce") <= dt_fim)
-        ]
+        rec["data_pagamento"] = pd.to_datetime(rec["data_pagamento"], errors="coerce")
+        rec_recebidos_f = rec[rec["data_pagamento"].notna() &
+                              (rec["data_pagamento"] >= dt_ini) &
+                              (rec["data_pagamento"] < dt_fim_excl)].copy()
         rec_recebidos_f["categoria_rec"] = "recebido"
     if "data_vencimento" in rec.columns:
-        rec_a_receber_f = rec[rec["data_pagamento"].isna()].copy() if "data_pagamento" in rec.columns else rec.copy()
-        rec_a_receber_f = rec_a_receber_f[
-            (pd.to_datetime(rec_a_receber_f["data_vencimento"], errors="coerce") >= dt_ini) &
-            (pd.to_datetime(rec_a_receber_f["data_vencimento"], errors="coerce") <= dt_fim)
-        ]
+        rec["data_vencimento"] = pd.to_datetime(rec["data_vencimento"], errors="coerce")
+        base = rec[rec.get("data_pagamento").isna()] if "data_pagamento" in rec.columns else rec
+        rec_a_receber_f = base[(base["data_vencimento"] >= dt_ini) &
+                               (base["data_vencimento"] < dt_fim_excl)].copy()
         rec_a_receber_f["categoria_rec"] = "a_receber"
 
 # REPASSES: separar pagos (pelo pagamento) e a pagar (pelo vencimento)
 rep_pagos_f = pd.DataFrame()
 rep_a_pagar_f = pd.DataFrame()
 if not rep.empty:
-    base_pg = "data_pagamento_repasse"
-    base_vc = "data_vencimento_repasse"
-    if base_pg in rep.columns:
-        rep_pagos_f = rep[rep[base_pg].notna()].copy()
-        rep_pagos_f = rep_pagos_f[
-            (pd.to_datetime(rep_pagos_f[base_pg], errors="coerce") >= dt_ini) &
-            (pd.to_datetime(rep_pagos_f[base_pg], errors="coerce") <= dt_fim)
-        ]
+    for _c in ["data_pagamento_repasse", "data_vencimento_repasse"]:
+        if _c in rep.columns:
+            rep[_c] = pd.to_datetime(rep[_c], errors="coerce")
+    if "data_pagamento_repasse" in rep.columns:
+        rep_pagos_f = rep[rep["data_pagamento_repasse"].notna() &
+                          (rep["data_pagamento_repasse"] >= dt_ini) &
+                          (rep["data_pagamento_repasse"] < dt_fim_excl)].copy()
         rep_pagos_f["categoria_rep"] = "pago"
-    if base_vc in rep.columns:
-        rep_a_pagar_f = rep[rep[base_pg].isna()].copy() if base_pg in rep.columns else rep.copy()
-        rep_a_pagar_f = rep_a_pagar_f[
-            (pd.to_datetime(rep_a_pagar_f[base_vc], errors="coerce") >= dt_ini) &
-            (pd.to_datetime(rep_a_pagar_f[base_vc], errors="coerce") <= dt_fim)
-        ]
+    if "data_vencimento_repasse" in rep.columns:
+        base = rep[rep.get("data_pagamento_repasse").isna()] if "data_pagamento_repasse" in rep.columns else rep
+        rep_a_pagar_f = base[(base["data_vencimento_repasse"] >= dt_ini) &
+                             (base["data_vencimento_repasse"] < dt_fim_excl)].copy()
         rep_a_pagar_f["categoria_rep"] = "a_pagar"
 
 # Para compatibilidade (se algo ainda usa rec_f/rep_f)
@@ -651,14 +687,13 @@ def merge_profissionais_sem_erros(os_view: pd.DataFrame, pro_base: pd.DataFrame)
                     out["foto_url"] = out["foto_url"].fillna(out["foto_url_pro2"])
                     out.drop(columns=[c for c in ["foto_url_pro2"] if c in out.columns], inplace=True)
 
-    # 3) Merge por nome (normalizado) — apenas se ambos prof_nome e foto_url existirem em pro_base
+    # 3) Merge por nome (normalizado)
     need_name_merge = ("foto_url" not in out.columns) or out["foto_url"].isna().all()
     if need_name_merge and ("prof_nome" in out.columns) and ("prof_nome" in pro_base.columns) and ("foto_url" in pro_base.columns):
         tmp = pro_base[safe_cols(pro_base, ["prof_nome", "foto_url"])].copy()
         if not tmp.empty and ("prof_nome" in tmp.columns) and ("foto_url" in tmp.columns):
             tmp["__nome_norm"] = tmp["prof_nome"].astype(str).map(_norm_text)
             out["__nome_norm"] = out["prof_nome"].astype(str).map(_norm_text)
-            # só faz o slice se ambas as colunas existem
             cols_final = safe_cols(tmp, ["__nome_norm", "foto_url"])
             if set(["__nome_norm", "foto_url"]).issubset(set(cols_final)):
                 tmp_final = tmp[cols_final].rename(columns={"foto_url": "foto_url_pro3"})
