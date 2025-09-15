@@ -979,13 +979,29 @@ with tabs[5]:
                 })
 
 # Atendimento + Foto (PERÍODO) — APENAS dados do atendimento (sem CEP e sem Financeiro)
+# Atendimento + Foto (PERÍODO) — APENAS dados do atendimento (sem CEP e sem Financeiro)
 with tabs[6]:
     st.subheader("Atendimento + Foto")
+
+    def _fmt_missing(x):
+        # formata ausências sem exibir "nan"/"None"
+        try:
+            if pd.isna(x):
+                return "—"
+        except Exception:
+            pass
+        s = str(x).strip()
+        return "—" if s.lower() in {"", "nan", "none", "<na>"} else s
+
     if os_view.empty:
         st.info("Não há dados suficientes no período selecionado.")
     else:
         os_view["os_id"] = os_view["os_id"].astype(str)
-        sel_os2 = st.selectbox("Selecione a OS (com foto)", options=sorted(os_view["os_id"].dropna().unique().tolist()), key="os_foto")
+        sel_os2 = st.selectbox(
+            "Selecione a OS (com foto)",
+            options=sorted(os_view["os_id"].dropna().unique().tolist()),
+            key="os_foto"
+        )
         registro2 = os_view[os_view["os_id"] == str(sel_os2)].copy()
         if registro2.empty:
             st.warning("OS não encontrada na seleção.")
@@ -994,17 +1010,23 @@ with tabs[6]:
 
             # ----- Dados do atendimento (da própria tabela) -----
             cliente_nome = reg.get("cliente_nome")
-            dt_txt = pd.to_datetime(reg.get("data_atendimento")).strftime('%d/%m/%Y') if pd.notna(reg.get("data_atendimento")) else "—"
-            status = reg.get("status_servico")
+            dt_txt = (
+                pd.to_datetime(reg.get("data_atendimento")).strftime('%d/%m/%Y')
+                if pd.notna(reg.get("data_atendimento")) else "—"
+            )
+            status  = reg.get("status_servico")
             endereco = reg.get("endereco") or reg.get("rua")
-            bairro = reg.get("bairro")
-            cidade = reg.get("cidade")
+            bairro   = reg.get("bairro")
+            cidade   = reg.get("cidade")
 
             # ----- Profissional da própria tabela de atendimentos -----
-            prof_id_show = reg.get("prof_id")      # Num Prestador normalizado
-            prof_nome_show = reg.get("prof_nome")  # Prestador
-            prof_cpf_show = reg.get("prof_cpf")
-            if (not isinstance(prof_cpf_show, str) or not prof_cpf_show.strip()) and isinstance(prof_id_show, (str,int,float)):
+            # (Com Opção 1, '#Num Prestador' -> 'num_prestador' -> mapeado para 'prof_id' na normalização)
+            prof_id_show   = reg.get("prof_id")      # veio de num_prestador
+            prof_nome_show = reg.get("prof_nome")    # veio de prestador
+            prof_cpf_show  = reg.get("prof_cpf")
+
+            # Complementa CPF/nome via cadastro se faltar (match por prof_id)
+            if (not isinstance(prof_cpf_show, str) or not prof_cpf_show.strip()) and isinstance(prof_id_show, (str, int, float)):
                 pid = str(prof_id_show)
                 if not pro_base.empty and "prof_id" in pro_base.columns:
                     rowp = pro_base[pro_base["prof_id"].astype(str) == pid]
@@ -1014,21 +1036,22 @@ with tabs[6]:
                             prof_nome_show = rowp.iloc[0].get("prof_nome") or prof_nome_show
 
             left, right = st.columns([2, 1])
+
             with left:
-                st.markdown(f"#### OS #{reg.get('os_id','')} — {cliente_nome or ''}")
+                st.markdown(f"#### OS #{_fmt_missing(reg.get('os_id'))} — {_fmt_missing(cliente_nome)}")
                 st.write({
-                    "Data": dt_txt,
-                    "Status": status,
-                    "Endereço": endereco or "—",
-                    "Bairro": bairro or "—",
-                    "Cidade": cidade or "—",
-                    "Profissional": prof_nome_show or "—",
-                    "ID Profissional": str(prof_id_show) if pd.notna(prof_id_show) else "—",
-                    "CPF Profissional": prof_cpf_show or "—",
+                    "Data": _fmt_missing(dt_txt),
+                    "Status": _fmt_missing(status),
+                    "Endereço": _fmt_missing(endereco),
+                    "Bairro": _fmt_missing(bairro),
+                    "Cidade": _fmt_missing(cidade),
+                    "Profissional": _fmt_missing(prof_nome_show),
+                    "ID Profissional": _fmt_missing(prof_id_show),
+                    "CPF Profissional": _fmt_missing(prof_cpf_show),
                 })
 
             with right:
-                # 1) foto no registro da OS
+                # 1) foto no próprio registro da OS (aceita vários nomes)
                 foto_url = None
                 for c in ["foto_url", "foto", "imagem_url", "imagem", "url_foto", "link_foto", "photo_url", "avatar_url"]:
                     if c in registro2.columns:
@@ -1040,23 +1063,26 @@ with tabs[6]:
                 # 2) se não houver, busca no cadastro por prof_id > cpf > nome
                 if not foto_url and not pro_base.empty:
                     found = False
-                    if isinstance(prof_id_show, (str,int,float)) and "prof_id" in pro_base.columns:
+                    if isinstance(prof_id_show, (str, int, float)) and "prof_id" in pro_base.columns:
                         pid = str(prof_id_show)
                         rowp = pro_base[pro_base["prof_id"].astype(str) == pid]
                         if not rowp.empty:
                             foto_url = rowp.iloc[0].get("foto_url"); found = True
                     if (not found) and isinstance(prof_cpf_show, str) and "prof_cpf" in pro_base.columns and prof_cpf_show.strip():
-                        cpf_d = _only_digits(prof_cpf_show)
-                        rowp = pro_base[pro_base["prof_cpf"].astype(str).map(_only_digits) == cpf_d]
+                        cpf_d = "".join(ch for ch in prof_cpf_show if ch.isdigit())
+                        rowp = pro_base[pro_base["prof_cpf"].astype(str).str.replace(r"\D", "", regex=True) == cpf_d]
                         if not rowp.empty:
                             foto_url = rowp.iloc[0].get("foto_url"); found = True
                     if (not found) and isinstance(prof_nome_show, str) and "prof_nome" in pro_base.columns and prof_nome_show.strip():
-                        nome_n = _norm_text(prof_nome_show)
-                        rowp = pro_base[pro_base["prof_nome"].astype(str).map(_norm_text) == nome_n]
+                        nome_n = unicodedata.normalize("NFKD", prof_nome_show).encode("ascii", "ignore").decode("ascii").strip().lower()
+                        nm_base = pro_base["prof_nome"].astype(str).apply(
+                            lambda s: unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii").strip().lower()
+                        )
+                        rowp = pro_base[nm_base == nome_n]
                         if not rowp.empty:
                             foto_url = rowp.iloc[0].get("foto_url")
 
-                # 3) fallback: template
+                # 3) fallback: template (PHOTO_URL_TEMPLATE)
                 if not foto_url:
                     foto_url = build_photo_from_template(
                         prof_id=prof_id_show,
@@ -1064,6 +1090,7 @@ with tabs[6]:
                         os_id=reg.get("os_id"),
                     )
 
+                # Render da foto/link
                 if isinstance(foto_url, str) and foto_url.startswith("http"):
                     st.image(foto_url, caption=(prof_nome_show or "Profissional"), use_column_width=True)
                     st.caption("Fonte: Atendimentos / cadastro (Profissionais) / Carteirinhas.xlsx ou PHOTO_URL_TEMPLATE.")
@@ -1072,6 +1099,8 @@ with tabs[6]:
                 else:
                     st.info("Sem foto para esta profissional. Garanta `prof_id` na OS e um mapeamento em Carteirinhas.xlsx (`prof_id` → `foto_url`).")
 
+
 st.markdown("---")
 st.caption("© Vavivê — Dashboard. Clientes/Profissionais não filtram por período; Atendimentos/Financeiro/OS sim. Aba 'Atendimento + Foto' usa apenas dados do atendimento e foto da profissional.")
+
 
